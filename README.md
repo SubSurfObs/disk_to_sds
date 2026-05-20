@@ -1,5 +1,9 @@
 # sdcard_to_sds
 
+**Architecture:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
+canonical pipeline (Pull on Mac → Plan/Apply on VM → Cleanup), the
+gap-fill decision logic, and the durable manifests in `manifests/`.
+
 # Seismic Upload Workflow (SD Cards → VM → Long-Term SDS)
 
 This repository does **not** store seismic data.  
@@ -37,42 +41,49 @@ All actual waveform data live in:
 
 ## Example usage
 
-*Gecko files arae minte long by default. Adding these to and SMB mounted disk is slow. In this example, we concat. the miniseed files to day long files using merge_days_gecko.sh *
+### Gecko SD card → SDS in one local step (recommended)
+
+For Gecko-format SD cards (`data/YYYY/MM/DD/HH/*.ms`) the unit already
+writes correct `NET.STA.LOC.CHA` codes in every MiniSEED record, so no
+remapping is needed. `scripts/gecko_sdcard_to_sds.py` streams 512-byte
+records straight from the SD card and routes each into its SDS day
+file — no decoding, no intermediate concat, no VM round-trip.
 
 ```
-#from this repo (on local filesystem) run the follwoing where BGT2 is teh name of the SD card, ./inbox/BGT2/
+./scripts/gecko_sdcard_to_sds.py "/Volumes/NO NAME/data" ./local_sds
+```
+
+Then rsync the resulting `local_sds/` into the long-term archive:
+
+```
+rsync -avh --progress ./local_sds/ /Volumes/proj-6700_uom_seismic_data-1128.4.1143/sdcard_to_sds/local_sds/
+```
+
+The script:
+- walks `YYYY/MM/DD/HH/*.ms` on the SD card
+- reads each record's SEED header (net/sta/loc/cha) and appends it to
+  `local_sds/YYYY/NET/STA/CHA.D/NET.STA.LOC.CHA.D.YYYY.DOY`
+- works with any Python that has no external deps (uses stdlib only)
+- typical throughput: ~150 MB/s reading the SD card on a Mac
+
+If the Gecko was misconfigured and the location code needs fixing, do
+it once at the end with `scmssort` / `scart` on the VM, or just rename
+files in the SDS tree.
+
+### Legacy workflow (concat → rsync → scart on VM)
+
+Kept for reference; only useful if the Gecko codes are wrong and you
+need scart's `--rename` to fix them.
+
+```
 ./scripts/merge_days_gecko.sh /Volumes/BGT2/data ./inbox/BGT2/
-
-
-#then rsync to this repo on mounted disk 
 rsync -avh --progress inbox/BGT2 /Volumes/proj-6700_uom_seismic_data-1128.4.1143/sdcard_to_sds/inbox
 
-#then on VM, (this repo on mounted disk) run:
-#note location code remapping here (it's quite easy to not set Geck loc code correctly, so this will homogenise to 00)
+# on VM:
 for f in ~/mnt/sdcard_to_sds/inbox/BGT2/*.mseed; do
-    echo "Processing $f"
-
-    cat "$f" \
-    | scmssort -u -E 2>/dev/null \
-    | scart -I - \
-        --rename "Z1.BGT2.*.*:Z1.BGT2.00.-" \
-        ~/mnt/sdcard_to_sds/local_sds
+    cat "$f" | scmssort -u -E 2>/dev/null \
+      | scart -I - --rename "Z1.BGT2.*.*:Z1.BGT2.00.-" \
+            ~/mnt/sdcard_to_sds/local_sds
 done
-
 ```
-In the above example, it would be nice to eliminet the write to local filesystem, for instance: 
-
-```
-time ./scripts/merge_days_gecko.sh /Volumes/BGT3/data /Volumes/proj-6700_uom_seismic_data-1128.4.1143/sdcard_to_sds/inbox/BGT3/
-```
-But this comes as a signficant performance cost (at least 10 times) 
-
-How about writing to a local external HD?
-
-## Next steps
-
-Given the perfomane limitations of transferring many small files, it's probablt worth runnign everything locally in one step, this means building seiscomp on teh mac, and then - instread of mioniseed concat, just use scarty to build a local SDS folder and copy that to the mount. Will explore using anintemediater external HD. 
-
-
-https://github.com/seiscomp-macOS/seiscomp
 

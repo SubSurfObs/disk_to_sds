@@ -5,3 +5,7 @@ inbox/*
 # Ignore everything inside local_sds/ but keep the folder
 local_sds/*
 !local_sds/.gitkeep
+
+# Plan files are ephemeral; durable manifests in manifests/*.jsonl are tracked
+manifests/plans/*
+!manifests/plans/.gitkeep
