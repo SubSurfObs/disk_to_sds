@@ -178,25 +178,28 @@ def process_day(day_dir: Path, sds_root: Path, year: int, month: int, day: int,
     return total_records, total_bytes, "ok", list(final_paths.values())
 
 
-def rsync_day_to_remote(local_paths: list[Path], local_root: Path,
-                        remote_root: Path, parallel: bool = False
-                        ) -> tuple[bool, str]:
-    """Rsync each completed-day file to the corresponding remote SDS path.
+def transfer_day_to_remote(local_paths: list[Path], local_root: Path,
+                           remote_root: Path) -> tuple[bool, str]:
+    """Copy each completed-day file to the corresponding remote SDS path.
 
-    parallel=False by default: on the mediaflux SMB mount, concurrent
-    rsyncs are ~10x slower than serial (per-connection bandwidth cap).
-    parallel=True is kept as an opt-in for other mounts where SMB can
-    actually multiplex.
+    Uses `cp` to a `.partial` on the remote, verifies the byte count, then
+    atomically renames into place. On the mediaflux SMB mount this is ~2x
+    faster than `rsync -a --partial` (which pays delta-transfer + checksum
+    + temp-file overhead that's pure waste for brand-new files), while
+    keeping the same crash-safety guarantees:
 
-    Returns (success, message). On success the local files are NOT deleted
+      - mid-cp crash leaves a `.partial` (SeisComp ignores it)
+      - rename is atomic on the same SMB filesystem
+      - size mismatch (truncated SMB write) is caught and reported
+
+    No `--delete` semantics anywhere — this only ever writes.
+
+    Returns (success, message). On success the LOCAL files are NOT deleted
     here — the caller decides (so --keep-local can opt out).
     """
     if not local_paths:
         return True, "no files"
 
-    # Pre-compute (lp, rp) pairs and ensure remote dirs exist (mkdir is the
-    # only step we MUST do before launching rsyncs).
-    plans: list[tuple[Path, Path]] = []
     for lp in local_paths:
         try:
             rel = lp.relative_to(local_root)
@@ -204,35 +207,25 @@ def rsync_day_to_remote(local_paths: list[Path], local_root: Path,
             return False, f"{lp} is not under local_root {local_root}"
         rp = remote_root / rel
         rp.parent.mkdir(parents=True, exist_ok=True)
-        plans.append((lp, rp))
+        rp_partial = rp.with_suffix(rp.suffix + ".partial")
+        local_size = lp.stat().st_size
 
-    def _rsync_cmd(lp: Path, rp: Path) -> list[str]:
-        # -a preserves perms/times; --partial keeps a half-transferred file
-        # around so a retry resumes instead of re-sending. No --delete:
-        # we never want this script to remove anything on the remote.
-        return ["rsync", "-a", "--partial", str(lp), str(rp)]
+        r = subprocess.run(["cp", str(lp), str(rp_partial)],
+                           capture_output=True, text=True)
+        if r.returncode != 0:
+            return False, f"cp {lp.name}: exit {r.returncode}: {r.stderr.strip()}"
 
-    if not parallel or len(plans) <= 1:
-        for lp, rp in plans:
-            r = subprocess.run(_rsync_cmd(lp, rp), capture_output=True, text=True)
-            if r.returncode != 0:
-                return False, f"rsync exit {r.returncode}: {r.stderr.strip()}"
-        return True, "ok"
+        # Verify the full payload landed before promoting.
+        try:
+            remote_size = rp_partial.stat().st_size
+        except OSError as e:
+            return False, f"stat {rp_partial.name}: {e}"
+        if remote_size != local_size:
+            return False, (f"{lp.name}: size mismatch after cp "
+                           f"(local {local_size}, remote {remote_size})")
 
-    # Launch all rsyncs concurrently; wait for all and collect failures.
-    procs = [(lp, rp, subprocess.Popen(_rsync_cmd(lp, rp),
-                                       stderr=subprocess.PIPE,
-                                       stdout=subprocess.DEVNULL))
-             for lp, rp in plans]
-    failures: list[str] = []
-    for lp, rp, proc in procs:
-        proc.wait()
-        if proc.returncode != 0:
-            err = proc.stderr.read().decode("utf-8", "replace").strip()
-            failures.append(f"{lp.name}: exit {proc.returncode}: {err}")
-        proc.stderr.close()
-    if failures:
-        return False, "; ".join(failures)
+        os.replace(rp_partial, rp)  # atomic rename on the same SMB mount
+
     return True, "ok"
 
 
@@ -360,7 +353,7 @@ def main(argv: list[str]) -> int:
                 return
             day_label, paths = item
             tr = time.time()
-            ok, msg = rsync_day_to_remote(paths, sds_root, remote_root)  # type: ignore[arg-type]
+            ok, msg = transfer_day_to_remote(paths, sds_root, remote_root)  # type: ignore[arg-type]
             dt = time.time() - tr
             with rsync_results_lock:
                 nonlocal_state["rsync_s"] += dt
@@ -408,7 +401,7 @@ def main(argv: list[str]) -> int:
                     rsync_q.put((day_label, written_paths))  # blocks if depth full
                 else:
                     tr = time.time()
-                    ok, msg = rsync_day_to_remote(written_paths, sds_root, remote_root)
+                    ok, msg = transfer_day_to_remote(written_paths, sds_root, remote_root)
                     dt_rsync = time.time() - tr
                     grand_rsync_s += dt_rsync
                     if ok:
