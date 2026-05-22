@@ -43,6 +43,7 @@ into the *same* long-term SeisComP SDS, sharing all the infrastructure we built:
 
 ## Pipeline stages
 
+0. **Identify/rename** (Mac, optional) — `scripts/rename_card.py`. On field return, reads `settings.ss` + scans the date range, then safely renames the macOS volume to a ledger-aligned label (FAT32: `STA+YYMMDD` ≤11 char e.g. `MARD250704`; exFAT: full `STA_<card-id>`) and registers `card.json` with `volume_label`. Rename is metadata-only/reversible; refuses anything without the `settings.ss`+`data/` Gecko signature. Purpose: unambiguously identify a card before the eventual wipe-and-reuse.
 1. **Pull** (Mac, this repo) — `scripts/gecko_sdcard_to_sds.py`. SD card → `/tmp/scratch` → rsync per-day → staging mount. SD card opened read-only, atomic `.partial→rename` on outputs.
 2. **Plan** (staging VM, future ledger repo) — examine staging vs LT; produce per-card plan.
 3. **Apply** (SeisComp VM, future ledger repo) — execute plan; cp staging→LT; append manifest. **Only host with write access to `/mnt/seiscomp`.**
