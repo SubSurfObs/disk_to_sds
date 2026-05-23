@@ -55,10 +55,11 @@ file — no decoding, no intermediate concat, no VM round-trip.
 ./scripts/gecko_sdcard_to_sds.py "/Volumes/NO NAME/data" ./local_sds
 ```
 
-Then rsync the resulting `local_sds/` into the long-term archive:
+Then rsync the resulting `local_sds/` into the staging mount (Mac writes
+to staging only, never to the long-term archive):
 
 ```
-rsync -avh --progress ./local_sds/ /Volumes/proj-6700_uom_seismic_data-1128.4.1143/sdcard_to_sds/local_sds/
+rsync -avh --progress ./local_sds/ /Volumes/proj-6700_seiscomp_staging-1128.4.1649/seiscomp_archive/
 ```
 
 The script:
@@ -79,13 +80,13 @@ need scart's `--rename` to fix them.
 
 ```
 ./scripts/merge_days_gecko.sh /Volumes/BGT2/data ./inbox/BGT2/
-rsync -avh --progress inbox/BGT2 /Volumes/proj-6700_uom_seismic_data-1128.4.1143/sdcard_to_sds/inbox
+rsync -avh --progress inbox/BGT2 /Volumes/proj-6700_seiscomp_staging-1128.4.1649/inbox
 
 # on VM:
-for f in ~/mnt/sdcard_to_sds/inbox/BGT2/*.mseed; do
+for f in /mnt/seiscomp_staging/inbox/BGT2/*.mseed; do
     cat "$f" | scmssort -u -E 2>/dev/null \
       | scart -I - --rename "Z1.BGT2.*.*:Z1.BGT2.00.-" \
-            ~/mnt/sdcard_to_sds/local_sds
+            /mnt/seiscomp_staging/seiscomp_archive
 done
 ```
 
