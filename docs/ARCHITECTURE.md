@@ -1,4 +1,6 @@
-# sdcard_to_sds — Architecture
+# disk_to_sds — Architecture
+
+_(Repo renamed from `sdcard_to_sds` on 2026-05-23.)_
 
 ## Goal
 
@@ -21,7 +23,7 @@ or partial gets the SD card data merged in (records deduped).
 │  /Volumes/<sdcard>/data      │        │  SeisComp tools available  │
 │       (READ ONLY)            │        │   (scmssort, scart, msi)   │
 │                              │        │                            │
-│  ~/projects/.../sdcard_to_sds│  git   │  ~/projects/.../sdcard...  │
+│  ~/projects/.../disk_to_sds  │  git   │  ~/projects/.../disk...    │
 │   (this repo)                ├────────┤   (same repo, separate co) │
 │                              │        │                            │
 │  Mounts:                     │        │  Mounts:                   │
@@ -143,7 +145,7 @@ on the card; user can override.
 ## Repo layout
 
 ```
-sdcard_to_sds/
+disk_to_sds/
 ├── README.md                     workflow + processed-card table
 ├── docs/ARCHITECTURE.md          this file
 ├── scripts/

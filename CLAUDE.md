@@ -1,4 +1,6 @@
-# CLAUDE.md — sdcard_to_sds
+# CLAUDE.md — disk_to_sds
+
+> Repo renamed `sdcard_to_sds` → `disk_to_sds` on 2026-05-23 (generic intent: many recorder types + layouts; Gecko SD is one adapter). GitHub redirects the old URL. The local Mac working dir may still be `sdcard_to_sds` until renamed at a session boundary (+ memory migrated).
 
 Session orientation for Claude Code. Canonical design in `docs/ARCHITECTURE.md`;
 this file is the quick brief.
@@ -6,14 +8,14 @@ this file is the quick brief.
 ## What this repo is
 
 Ingest pipeline: **field SD card → SMB staging → long-term SeisComp SDS archive**.
-Today it handles SRC Gecko SD cards; eventually generalises to any local-disc
-recorder (will be renamed `local_disc_to_sds`).
+Today it handles SRC Gecko SD cards; generalising to any local-disk recorder
+and on-disk layout (the repo is now `disk_to_sds`; Gecko SD is the first adapter).
 
 ## 3-repo architecture
 
 | Repo | Scope | Status |
 |---|---|---|
-| `sdcard_to_sds` (this repo, → `local_disc_to_sds`) | SD/local disc → staging mount | active |
+| `disk_to_sds` (this repo) | SD/local disk → staging mount | active |
 | `eqserver_2_seiscomp` (`/Users/DSAND/projects/SubSurfObs/eqserver_2_seiscomp`) | old EqServer archive (PC-SUDS/EchoPro + miniSEED) → staging mount; one-off | active, skeleton |
 | `sds_staging_ledger` (`/Users/DSAND/projects/SubSurfObs/sds_staging_ledger`) | manifest + apply + per-card plotting; only writer to LT | **exists** (cloned on Mac, staging VM, dev1) |
 
@@ -100,7 +102,7 @@ Skip decisions are NOT logged per-day-channel (would bloat the file); per-card s
 | Mac (DSAND laptop) | SD card via `/Volumes/<sdcard>/` (Finder, READ ONLY) | Pull stage |
 | Mac | SMB staging via `/Volumes/proj-6700_seiscomp_staging-1128.4.1649/` (Finder) | rsync destination |
 | Staging VM (`172.26.144.41`, dsand@) | `/mnt/seiscomp_staging` (CIFS+Kerberos, noauto, in fstab) | Plan, cleanup |
-| Staging VM | `~/projects/SubSurfObs/sdcard_to_sds/` (git checkout, .venv with obspy) | scripts |
+| Staging VM | `~/projects/SubSurfObs/disk_to_sds/` (git checkout) | scripts |
 | SeisComp VM (existing, separate) | `/mnt/seiscomp` (local) | Apply stage |
 
 Mount names matter:

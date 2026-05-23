@@ -1,4 +1,6 @@
-# sdcard_to_sds
+# disk_to_sds
+
+_(formerly `sdcard_to_sds`; renamed 2026-05-23 as the scope generalises beyond Gecko SD cards to multiple recorder types and on-disk layouts. The Gecko SD-card path is one adapter.)_
 
 **Architecture:** see [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the
 canonical pipeline (Pull on Mac → Plan/Apply on VM → Cleanup), the
