@@ -1,6 +1,6 @@
 # CLAUDE.md — disk_to_sds
 
-> Repo renamed `sdcard_to_sds` → `disk_to_sds` on 2026-05-23 (generic intent: many recorder types + layouts; Gecko SD is one adapter). GitHub redirects the old URL. The local Mac working dir may still be `sdcard_to_sds` until renamed at a session boundary (+ memory migrated).
+> Repo renamed `sdcard_to_sds` → `disk_to_sds` on 2026-05-23 (generic intent: many recorder types + layouts; Gecko SD is one adapter). GitHub redirects the old URL. Local Mac working dir, git remote, and Claude memory all migrated to `disk_to_sds`.
 
 Session orientation for Claude Code. Canonical design in `docs/ARCHITECTURE.md`;
 this file is the quick brief.
