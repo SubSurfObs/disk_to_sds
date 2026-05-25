@@ -51,6 +51,36 @@ into the *same* long-term SeisComP SDS, sharing all the infrastructure we built:
 3. **Apply** (SeisComp VM, future ledger repo) — execute plan; cp staging→LT; append manifest. **Only host with write access to `/mnt/seiscomp`.**
 4. **Cleanup** (staging VM) — remove staged data after successful apply; mark card done in `cards/<card-id>.json`.
 
+## Card upload runbook — trigger: "upload" / "process this card"
+
+When the user says **"upload"** (or "process this card"), act as an agent: don't
+just run the pull. Drive the card through the stages below, report after each,
+and stop only at the two irreversible **GATES** (LT commit, wipe). Commands
+verified 2026-05-25 on VW.OUTU.
+
+1. **Identify** (Mac) — `scripts/rename_card.py "/Volumes/<vol>"` (dry-run →
+   `--commit`). Run FIRST: labels the volume (`STA+YYMMDD`) and creates
+   `cards/<NET>.<STA>/<card-id>/card.json`. Out-of-order leaves the note stale.
+2. **Pull → staging** (Mac) — `scripts/gecko_sdcard_to_sds.py "/Volumes/<vol>/data" /tmp/sds_scratch_<sta> --fast --skip-existing --rsync-to /Volumes/proj-6700_seiscomp_staging-1128.4.1649/seiscomp_archive`.
+   Check the printed `SKIP` list is pre-GPS-lock junk only (date-window filter).
+3. **Apply → LT** — `ssh seiscomp@seismology-dev1.its.unimelb.edu.au`, then
+   `cd ~/projects/SubSurfObs/sds_staging_ledger && python3 apply.py --staging-root /mnt/seiscomp_staging/seiscomp_archive --lt-root /mnt/seiscomp_archive --ledger-root ./seiscomp_archive --net <NET> --sta <STA> --source-card <card-id>`.
+   DRY-RUN first. **GATE: show the dry-run, get an explicit go before adding `--commit`.**
+   A new station is all `write` (additive); `--mode overwrite --fast` is fine then.
+4. **Cleanup** — `ssh dsand@172.26.144.41`, `cleanup.py ... --net <NET> --sta <STA> --source-card <card-id>` (dry-run → `--commit`): verifies staged==LT,
+   deletes staging, stamps `card.json.cleanup.complete`.
+5. **Wipe** (Mac) — ONLY once data is verified in LT (apply done + staged-vs-LT
+   match). The **user does this manually in the Disk Utility GUI** (visual volume
+   selection) — do NOT run it. Identify + confirm the volume (name/size), then
+   hand off: reformat to **MS-DOS (FAT32)** for ≤32 GB, **ExFAT** for larger.
+   (CLI equivalent if ever needed: `diskutil eraseDisk FAT32 <LABEL> MBRFormat /dev/diskN`.)
+
+Notes:
+- Apply LT root on dev1 is `/mnt/seiscomp_archive` (CIFS **rw**), not `/mnt/seiscomp`.
+- Known gap: pull + apply do NOT auto-stamp card.json (`pull_date`/`day_count`/
+  `channels`/`staging_path`/`applied_to_lt`). Flag the missing fields — do not
+  hand-edit the record (see memory `no-manual-provenance-edits`).
+
 ## Invariants (do not violate)
 
 - **SD card is read-only during ingest.** Every input opened `"rb"` only. Startup guard refuses to run if output is inside SD card mount.

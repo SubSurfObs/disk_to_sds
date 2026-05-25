@@ -6,6 +6,13 @@ _(formerly `sdcard_to_sds`; renamed 2026-05-23 as the scope generalises beyond G
 canonical pipeline (Pull on Mac → Plan/Apply on VM → Cleanup), the
 gap-fill decision logic, and the durable manifests in `manifests/`.
 
+**Processing a card:** the step-by-step runbook — identify → pull → apply →
+cleanup → wipe, with the exact commands and the safety gates — is the
+*Card upload runbook* in [`CLAUDE.md`](CLAUDE.md). Just tell Claude **"upload"**
+(or "process this card") and it will drive those stages, pausing for your OK
+before the two irreversible steps (writing to the long-term archive, and wiping
+the card).
+
 # Seismic Upload Workflow (SD Cards → VM → Long-Term SDS)
 
 This repository does **not** store seismic data.  

@@ -35,6 +35,7 @@ Examples:
 
 from __future__ import annotations
 
+import json
 import os
 import queue
 import re
@@ -229,6 +230,85 @@ def transfer_day_to_remote(local_paths: list[Path], local_root: Path,
     return True, "ok"
 
 
+def peek_identity(day_dir: Path, max_files: int = 5) -> tuple[str, str, list[str]]:
+    """Read a few records from the first files in a day dir to learn net, sta,
+    and the channel set (from the SEED headers, same source the writer uses).
+    Returns ("","",[]) if more than one net/sta is seen (ambiguous card)."""
+    nets: set[str] = set()
+    stas: set[str] = set()
+    chas: set[str] = set()
+    for f in sorted(p for p in day_dir.rglob("*.ms") if p.is_file())[:max_files]:
+        if f.stat().st_size < 48:
+            continue
+        data = f.read_bytes()
+        reclen = reclen_from_first_record(data[:64])
+        for i in range(len(data) // reclen):
+            rec = data[i * reclen:(i + 1) * reclen]
+            sta = rec[8:13].decode("ascii", "replace").strip()
+            cha = rec[15:18].decode("ascii", "replace").strip()
+            net = rec[18:20].decode("ascii", "replace").strip()
+            if net and sta and cha:
+                nets.add(net)
+                stas.add(sta)
+                chas.add(cha)
+    if len(nets) != 1 or len(stas) != 1:
+        return "", "", []
+    return next(iter(nets)), next(iter(stas)), sorted(chas)
+
+
+def stamp_pull_card_json(cards_root: Path, settings_path: Path,
+                         full_day_dirs: list[tuple[Path, int, int, int]],
+                         remote_root: Path | None) -> None:
+    """After a successful pull, record pull provenance into the card.json that
+    rename_card.py created. Update-only: if no matching card.json exists, this
+    prints a note and does nothing (run rename_card.py first). Never raises out;
+    stamping is secondary to the data already being safely in staging."""
+    if not full_day_dirs:
+        print("card.json: no in-window days; skipping stamp.")
+        return
+    if not settings_path.is_file():
+        print(f"card.json: no settings.ss at {settings_path}; skipping stamp.")
+        return
+    serial = ""
+    for line in settings_path.read_text(errors="replace").splitlines():
+        m = re.match(r'"(\w+)"\s*=\s*"?([^"\n]*?)"?\s*$', line.strip())
+        if m and m.group(1) == "serial":
+            serial = m.group(2).strip()
+            break
+    if not serial:
+        print("card.json: serial not in settings.ss; skipping stamp.")
+        return
+    dates = [date(y, mo, d) for (_p, y, mo, d) in full_day_dirs]
+    start, end = min(dates), max(dates)
+    # card-id format MUST match rename_card.py.
+    card_id = f"{start:%Y%m%d}-{end:%Y%m%d}_{serial[-4:]}"
+    net, sta, channels = peek_identity(full_day_dirs[0][0])
+    if not (net and sta):
+        print("card.json: could not resolve a single net/sta from records; "
+              "skipping stamp.")
+        return
+    card_path = cards_root / f"{net}.{sta}" / card_id / "card.json"
+    if not card_path.exists():
+        print(f"card.json: {card_path} not found — run rename_card.py first to "
+              "register the card; skipping pull stamp.")
+        return
+    rec = json.loads(card_path.read_text())
+    rec["pull_date"] = date.today().isoformat()
+    rec["day_count"] = len(full_day_dirs)
+    rec["data_span"] = {"start": start.isoformat(), "end": end.isoformat()}
+    if channels:
+        rec["channels"] = channels
+    if remote_root is not None:
+        rec["staging_path"] = f"{remote_root.name}/<YYYY>/{net}/{sta}"
+    note = rec.get("notes", "")
+    if (not note) or ("pending" in note):
+        rec["notes"] = (f"Pulled to staging {rec['pull_date']} "
+                        f"({len(full_day_dirs)} days); apply pending. "
+                        "Pre-GPS-lock day-dirs excluded by date window.")
+    card_path.write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n")
+    print(f"card.json: stamped pull metadata -> {card_path}")
+
+
 def main(argv: list[str]) -> int:
     import argparse
     p = argparse.ArgumentParser(
@@ -246,6 +326,14 @@ def main(argv: list[str]) -> int:
                         "exists (idempotent re-run after a crash)")
     p.add_argument("--limit", type=int, default=0,
                    help="only process the first N day directories (for testing)")
+    p.add_argument("--min-date", default="2015-01-01",
+                   help="skip day directories dated before this (YYYY-MM-DD). "
+                        "Recorders write pre-GPS-lock bootup data with their "
+                        "default clock (e.g. 2012-01-01) until satellite lock; "
+                        "this drops it. Default 2015-01-01.")
+    p.add_argument("--max-date", default=None,
+                   help="skip day directories dated after this (YYYY-MM-DD). "
+                        "Default: today (drops GPS week-rollover future dates).")
     p.add_argument("--rsync-to", default=None,
                    help="after each day finishes locally, rsync the 3 day-channel "
                         "files to this REMOTE SDS root and delete the local copies. "
@@ -263,6 +351,15 @@ def main(argv: list[str]) -> int:
                         "once. Bigger = more headroom against rsync stalls "
                         "at the cost of /tmp footprint (~100 MB/day). "
                         "Default 2.")
+    p.add_argument("--cards-root",
+                   default=str(Path(__file__).resolve().parents[2]
+                               / "sds_staging_ledger" / "cards"),
+                   help="ledger cards/ dir; after a successful pull, stamp pull "
+                        "metadata (pull_date/day_count/channels/staging_path) "
+                        "into the matching card.json that rename_card.py created. "
+                        "Default: ../../sds_staging_ledger/cards.")
+    p.add_argument("--no-card-json", action="store_true",
+                   help="don't stamp card.json after the pull.")
     args = p.parse_args(argv[1:])
 
     sd_data_dir = Path(args.sdcard_data_dir)
@@ -300,8 +397,14 @@ def main(argv: list[str]) -> int:
             return 2
         remote_root.mkdir(parents=True, exist_ok=True)
 
+    # Valid-date window: drop pre-GPS-lock bootup dirs (default clock, e.g.
+    # 2012) and any future-dated dirs from GPS week-rollover glitches.
+    min_date = date.fromisoformat(args.min_date)
+    max_date = date.fromisoformat(args.max_date) if args.max_date else date.today()
+
     # Find day dirs: YYYY/MM/DD
     day_dirs: list[tuple[Path, int, int, int]] = []
+    skipped_dates: list[tuple[Path, str]] = []
     for year_dir in sorted(p for p in sd_data_dir.iterdir() if p.is_dir() and p.name.isdigit()):
         for month_dir in sorted(p for p in year_dir.iterdir() if p.is_dir() and p.name.isdigit()):
             for day_dir in sorted(p for p in month_dir.iterdir() if p.is_dir() and p.name.isdigit()):
@@ -309,8 +412,24 @@ def main(argv: list[str]) -> int:
                 if not m:
                     continue
                 y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                try:
+                    dd = date(y, mo, d)
+                except ValueError:
+                    skipped_dates.append((day_dir, f"invalid date {y:04d}-{mo:02d}-{d:02d}"))
+                    continue
+                if dd < min_date or dd > max_date:
+                    skipped_dates.append((day_dir, dd.isoformat()))
+                    continue
                 day_dirs.append((day_dir, y, mo, d))
 
+    if skipped_dates:
+        print(f"Skipping {len(skipped_dates)} day-dir(s) outside date window "
+              f"[{min_date} .. {max_date}] (pre-GPS-lock / clock-glitch garbage):")
+        for pth, why in skipped_dates:
+            print(f"  SKIP {why}: {pth}")
+        print()
+
+    full_day_dirs = list(day_dirs)  # full filtered set, for card.json span/count
     if args.limit > 0:
         day_dirs = day_dirs[:args.limit]
 
@@ -433,6 +552,14 @@ def main(argv: list[str]) -> int:
         for f in rsync_failures:
             print(f"  {f}")
         return 1
+
+    if not args.no_card_json:
+        try:
+            stamp_pull_card_json(Path(args.cards_root),
+                                 sd_data_dir.parent / "settings.ss",
+                                 full_day_dirs, remote_root)
+        except Exception as e:  # stamping must never fail a good pull
+            print(f"card.json: stamp skipped ({e})")
     return 0
 
 

@@ -68,14 +68,24 @@ def read_settings(vol: Path) -> dict:
     return out
 
 
-def scan_date_range(vol: Path) -> tuple[date, date]:
+def scan_date_range(vol: Path, min_date: date, max_date: date) -> tuple[date, date]:
     days = []
     for d in (vol / "data").glob("*/*/*"):
         m = DAY_RE.search(str(d))
-        if m and d.is_dir():
-            days.append(date(int(m.group(1)), int(m.group(2)), int(m.group(3))))
+        if not (m and d.is_dir()):
+            continue
+        try:
+            dd = date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            continue
+        # Ignore pre-GPS-lock bootup dates (recorder default clock, e.g. 2012)
+        # and clock-glitch future dates so the card-id/label use the real span.
+        if min_date <= dd <= max_date:
+            days.append(dd)
     if not days:
-        raise ValueError("no data/YYYY/MM/DD day directories found")
+        raise ValueError(
+            f"no data/YYYY/MM/DD day directories within [{min_date} .. {max_date}] "
+            "(all filtered as pre-GPS-lock / clock-glitch dates?)")
     return min(days), max(days)
 
 
@@ -111,6 +121,12 @@ def main(argv: list[str]) -> int:
                    help=f"ledger cards/ dir for card.json (default: {default_cards})")
     p.add_argument("--commit", action="store_true",
                    help="actually rename the volume + write card.json (default: dry-run)")
+    p.add_argument("--min-date", default="2015-01-01",
+                   help="ignore day-dirs before this when computing the data span "
+                        "(drops pre-GPS-lock bootup dates like 2012-01-01). "
+                        "Default 2015-01-01.")
+    p.add_argument("--max-date", default=None,
+                   help="ignore day-dirs after this. Default: today.")
     args = p.parse_args(argv[1:])
 
     # Resolve volume.
@@ -146,7 +162,9 @@ def main(argv: list[str]) -> int:
         print(f"REFUSING: settings.ss missing sitename/serial (sta={sta!r} serial={serial!r}).")
         return 2
     serial4 = serial[-4:]
-    start, end = scan_date_range(vol)
+    min_date = date.fromisoformat(args.min_date)
+    max_date = date.fromisoformat(args.max_date) if args.max_date else date.today()
+    start, end = scan_date_range(vol, min_date, max_date)
     fs = get_fs(vol)
 
     card_id = f"{start:%Y%m%d}-{end:%Y%m%d}_{serial4}"
