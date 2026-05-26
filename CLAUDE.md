@@ -58,10 +58,16 @@ just run the pull. Drive the card through the stages below, report after each,
 and stop only at the two irreversible **GATES** (LT commit, wipe). Commands
 verified 2026-05-25 on VW.OUTU.
 
-1. **Identify** (Mac) — `scripts/rename_card.py "/Volumes/<vol>"` (dry-run →
-   `--commit`). Run FIRST: labels the volume (`STA+YYMMDD`) and creates
-   `cards/<NET>.<STA>/<card-id>/card.json`. Out-of-order leaves the note stale.
-2. **Pull → staging** (Mac) — `scripts/gecko_sdcard_to_sds.py "/Volumes/<vol>/data" /tmp/sds_scratch_<sta> --fast --skip-existing --rsync-to /Volumes/proj-6700_seiscomp_staging-1128.4.1649/seiscomp_archive`.
+1. **Identify** (Mac) — `scripts/rename_card.py "/Volumes/<vol>" --network VW`
+   (dry-run → `--commit`). Run FIRST: labels the volume (`STA+YYMMDD`), creates
+   `cards/<NET>.<STA>/<card-id>/card.json`, AND walks the ~6k hourly `.ss`
+   snapshots to write `settings_epoch.ss` + `settings_changes.jsonl` (config
+   diffs only — volatile fields filtered) + `settings_final.ss` into the same
+   card dir. Skip the .ss extract with `--no-settings-history`. **Network: pass
+   `--network VW`** — current SD tranche predates the FDSN VW assignment
+   (see memory `sdcard-network-override-vw`). Out-of-order leaves the note stale.
+2. **Pull → staging** (Mac) — `scripts/gecko_sdcard_to_sds.py "/Volumes/<vol>/data" /tmp/sds_scratch_<sta> --fast --skip-existing --network VW --rsync-to /Volumes/proj-6700_seiscomp_staging-1128.4.1649/seiscomp_archive`.
+   `--network VW` rewrites bytes 18:20 of every MSEED record + SDS path.
    Check the printed `SKIP` list is pre-GPS-lock junk only (date-window filter).
 3. **Apply → LT** — `ssh seiscomp@seismology-dev1.its.unimelb.edu.au`, then
    `cd ~/projects/SubSurfObs/sds_staging_ledger && python3 apply.py --staging-root /mnt/seiscomp_staging/seiscomp_archive --lt-root /mnt/seiscomp_archive --ledger-root ./seiscomp_archive --net <NET> --sta <STA> --source-card <card-id>`.

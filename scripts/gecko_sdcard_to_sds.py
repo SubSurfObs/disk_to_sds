@@ -72,7 +72,8 @@ def sds_path(sds_root: Path, year: int, doy: int, net: str, sta: str,
 
 def process_day(day_dir: Path, sds_root: Path, year: int, month: int, day: int,
                 buffer_bytes: int = 0, skip_existing: bool = False,
-                remote_root: Path | None = None
+                remote_root: Path | None = None,
+                network_override: str | None = None,
                 ) -> tuple[int, int, str, list[Path]]:
     """Returns (records_written, bytes_written, status, final_local_paths).
 
@@ -105,6 +106,9 @@ def process_day(day_dir: Path, sds_root: Path, year: int, month: int, day: int,
     total_records = 0
     total_bytes = 0
     failed = False
+    # For network override: pad/truncate to exactly 2 ASCII bytes (SEED net field).
+    net_override_bytes = (network_override.encode("ascii").ljust(2)[:2]
+                          if network_override else None)
 
     try:
         for f in ms_files:
@@ -125,7 +129,14 @@ def process_day(day_dir: Path, sds_root: Path, year: int, month: int, day: int,
                 sta = rec[8:13].decode("ascii", "replace").strip()
                 loc = rec[13:15].decode("ascii", "replace").strip()
                 cha = rec[15:18].decode("ascii", "replace").strip()
-                net = rec[18:20].decode("ascii", "replace").strip()
+                if net_override_bytes is not None:
+                    # Rewrite the SEED network field in-place. Used for old
+                    # cards whose Gecko was configured with a pre-FDSN code
+                    # (e.g. "UM") that's now obsolete.
+                    rec = rec[:18] + net_override_bytes + rec[20:]
+                    net = network_override
+                else:
+                    net = rec[18:20].decode("ascii", "replace").strip()
                 # Drop bootup / no-GPS-lock records that have factory-default
                 # codes (empty net, or default station like "GECK6"). These
                 # otherwise pollute the SDS tree with malformed paths.
@@ -230,10 +241,14 @@ def transfer_day_to_remote(local_paths: list[Path], local_root: Path,
     return True, "ok"
 
 
-def peek_identity(day_dir: Path, max_files: int = 5) -> tuple[str, str, list[str]]:
+def peek_identity(day_dir: Path, max_files: int = 5,
+                  network_override: str | None = None
+                  ) -> tuple[str, str, list[str]]:
     """Read a few records from the first files in a day dir to learn net, sta,
     and the channel set (from the SEED headers, same source the writer uses).
-    Returns ("","",[]) if more than one net/sta is seen (ambiguous card)."""
+    Returns ("","",[]) if more than one net/sta is seen (ambiguous card).
+    If network_override is set, the returned net is the override (matching what
+    the writer rewrote into the SDS records)."""
     nets: set[str] = set()
     stas: set[str] = set()
     chas: set[str] = set()
@@ -253,12 +268,14 @@ def peek_identity(day_dir: Path, max_files: int = 5) -> tuple[str, str, list[str
                 chas.add(cha)
     if len(nets) != 1 or len(stas) != 1:
         return "", "", []
-    return next(iter(nets)), next(iter(stas)), sorted(chas)
+    return (network_override if network_override else next(iter(nets)),
+            next(iter(stas)), sorted(chas))
 
 
 def stamp_pull_card_json(cards_root: Path, settings_path: Path,
                          full_day_dirs: list[tuple[Path, int, int, int]],
-                         remote_root: Path | None) -> None:
+                         remote_root: Path | None,
+                         network_override: str | None = None) -> None:
     """After a successful pull, record pull provenance into the card.json that
     rename_card.py created. Update-only: if no matching card.json exists, this
     prints a note and does nothing (run rename_card.py first). Never raises out;
@@ -282,7 +299,8 @@ def stamp_pull_card_json(cards_root: Path, settings_path: Path,
     start, end = min(dates), max(dates)
     # card-id format MUST match rename_card.py.
     card_id = f"{start:%Y%m%d}-{end:%Y%m%d}_{serial[-4:]}"
-    net, sta, channels = peek_identity(full_day_dirs[0][0])
+    net, sta, channels = peek_identity(full_day_dirs[0][0],
+                                       network_override=network_override)
     if not (net and sta):
         print("card.json: could not resolve a single net/sta from records; "
               "skipping stamp.")
@@ -360,7 +378,16 @@ def main(argv: list[str]) -> int:
                         "Default: ../../sds_staging_ledger/cards.")
     p.add_argument("--no-card-json", action="store_true",
                    help="don't stamp card.json after the pull.")
+    p.add_argument("--network", default=None,
+                   help="override the SEED network field on every record (bytes "
+                        "18:20 of each 512 B MSEED record). Use for cards whose "
+                        "Gecko was configured with a pre-FDSN code (e.g. 'UM') "
+                        "that's now obsolete. Affects record contents AND the "
+                        "SDS path (NET/STA/CHA.D). 2 ASCII chars max.")
     args = p.parse_args(argv[1:])
+    if args.network is not None and len(args.network.strip()) > 2:
+        print(f"ERROR: --network must be <= 2 chars (got {args.network!r})")
+        return 2
 
     sd_data_dir = Path(args.sdcard_data_dir)
     sds_root = Path(args.sds_root)
@@ -500,7 +527,7 @@ def main(argv: list[str]) -> int:
             ts = time.time()
             recs, byts, status, written_paths = process_day(
                 day_dir, sds_root, y, mo, d, buffer_bytes, args.skip_existing,
-                remote_root)
+                remote_root, network_override=args.network)
             dt_write = time.time() - ts
             mb = byts / (1024 * 1024)
             rate = mb / dt_write if dt_write > 0 else 0.0
@@ -557,7 +584,8 @@ def main(argv: list[str]) -> int:
         try:
             stamp_pull_card_json(Path(args.cards_root),
                                  sd_data_dir.parent / "settings.ss",
-                                 full_day_dirs, remote_root)
+                                 full_day_dirs, remote_root,
+                                 network_override=args.network)
         except Exception as e:  # stamping must never fail a good pull
             print(f"card.json: stamp skipped ({e})")
     return 0

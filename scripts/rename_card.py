@@ -127,6 +127,14 @@ def main(argv: list[str]) -> int:
                         "Default 2015-01-01.")
     p.add_argument("--max-date", default=None,
                    help="ignore day-dirs after this. Default: today.")
+    p.add_argument("--network", default=None,
+                   help="override the network code from settings.ss (e.g. VW). "
+                        "Use for cards that predate the FDSN VW assignment — "
+                        "the settings.ss network is then obsolete.")
+    p.add_argument("--no-settings-history", action="store_true",
+                   help="don't extract the per-card settings epoch + change "
+                        "history (default: extract; reads ~6k hourly .ss files "
+                        "off the card, can take a few minutes on slow media).")
     args = p.parse_args(argv[1:])
 
     # Resolve volume.
@@ -154,7 +162,8 @@ def main(argv: list[str]) -> int:
 
     s = read_settings(vol)
     sta = s.get("sitename", "").strip()
-    net = s.get("network_code", "").strip()
+    net_in_ss = s.get("network_code", "").strip()
+    net = args.network.strip() if args.network else net_in_ss
     loc = s.get("location_id", "").strip()
     serial = s.get("serial", "").strip()
     rate = s.get("sampling_rate", "").strip()
@@ -176,7 +185,8 @@ def main(argv: list[str]) -> int:
     cur_name = vol.name
     print(f"Volume        : {vol}  (current label: {cur_name!r})")
     print(f"Filesystem    : {fs}")
-    print(f"Station/serial : {net}.{sta}  serial {serial} ({serial4}), {rate} Hz, loc {loc}")
+    net_note = "" if (not args.network or net == net_in_ss) else f"  [override; settings.ss said {net_in_ss!r}]"
+    print(f"Station/serial : {net}.{sta}  serial {serial} ({serial4}), {rate} Hz, loc {loc}{net_note}")
     print(f"Data span     : {start} -> {end}")
     print(f"Ledger card-id : {card_id}   (cards/{net}.{sta}/{card_id}/)")
     print(f"New volume label: {label!r}   [{label_kind}]")
@@ -227,11 +237,27 @@ def main(argv: list[str]) -> int:
                 "applied_to_lt": False,
                 "notes": "Registered by rename_card.py at field-return; pull/apply pending.",
             }
+            if args.network and net != net_in_ss:
+                rec["net_override"] = {"from_settings_ss": net_in_ss, "applied": net}
             print(f"Created {card_path}")
         card_dir.mkdir(parents=True, exist_ok=True)
         card_path.write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n")
     else:
         print(f"(--cards-root {cards_root} not found; skipped card.json registration)")
+
+    # Settings-history extraction: epoch + non-volatile config diffs + final
+    # snapshot, into the same card dir. Reads ~6k hourly .ss files; the cost
+    # is unavoidable but happens only once at field-return. Failure here must
+    # not unwind the rename/card.json work above.
+    if not args.no_settings_history:
+        try:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            import extract_card_settings as ecs
+            print()
+            ecs.extract(vol, Path(args.cards_root), set(ecs.VOLATILE_FIELDS),
+                        commit=True, network_override=args.network)
+        except Exception as e:
+            print(f"settings-history: extraction skipped ({type(e).__name__}: {e})")
 
     return 0
 
