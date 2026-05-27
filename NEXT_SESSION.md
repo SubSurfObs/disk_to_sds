@@ -80,11 +80,31 @@ git push
 
 **Back on Mac** + **staging VM**: `git pull --rebase` to converge.
 
-### 4. Patch the scripts so this doesn't happen again
-Add `git pull --rebase && git add ... && git commit ... && git push` at the
-end of each stage's script (rename_card, gecko_sdcard_to_sds, apply, cleanup)
-so the ledger stays converged automatically. Needs push-credentials set up on
-all three hosts (Mac already has; staging VM + dev1 need to be checked).
+### 4. ~~Patch the scripts~~ — DONE 2026-05-27 evening
+Patched + pushed (ledger commit `923682a`, disk_to_sds commit `177edff`).
+`sds_staging_ledger/ledger_git.py:commit_and_push()` is the shared helper.
+All four stage scripts call it at end-of-main: rename_card, gecko_sdcard_to_sds,
+apply, cleanup. End-to-end tested on the Mac (commit `1127e94`, reverted as
+`bc59062`). `--no-autocommit` flag on each script to opt out.
+
+**Pre-flight for first runs on staging VM + dev1:**
+- `cd ~/projects/SubSurfObs/sds_staging_ledger && git pull` to get the helper.
+- Confirm `git push` works from that host (push credentials, network).
+- First real apply.py / cleanup.py run will auto-commit; watch for the
+  `ledger: committed + pushed: ...` line. Failure is logged but doesn't
+  fail the stage; commit stays local for next run's pull-push cycle.
+
+## Heads-up: staging VM disk issues (2026-05-27 evening)
+
+User flagged "disk issues on the VM" while wrapping up this session. Before
+touching the staging VM (`dsand@172.26.144.41`) for Task 3's commits or
+Task 2-style cleanup runs, **check VM disk health first** (`df -h`, `dmesg
+| tail`, mount status of `/mnt/seiscomp_staging`). The eqserver merge mentioned
+above (45 GB `full_manifest.db`, 72 GB of part-DBs) is likely the cause —
+they're consuming a lot of local disk on the VM. Don't run anything writing
+to the VM disk until that's known good. The reconcile commits are tiny but
+the cleanup runs delete large amounts of staged data and shouldn't happen
+on a wobbly disk.
 
 ## Heads-up: incoming changes from eqserver_2_seiscomp
 
