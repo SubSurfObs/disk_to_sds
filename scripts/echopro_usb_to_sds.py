@@ -35,75 +35,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import suds_convert as sc  # noqa: E402
+from staging_buffer import BufferedStaging  # noqa: E402
 
 DAY_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})$")
 STA_RE = re.compile(r".*_([A-Za-z0-9]+)\.dmx(?:\.gz)?$")
 
 _STOP = {"flag": False}
-
-# OSError errnos that almost always mean "SMB mount dropped" rather than a
-# real programming/permissions bug. ENOTCONN is the one macOS raises first
-# when an in-flight write hits a stale CIFS connection.
-_MOUNT_DROP_ERRNOS = {errno.ENOTCONN, errno.EIO, errno.ENODEV, errno.ENOENT,
-                      errno.EPIPE, errno.ETIMEDOUT, errno.EHOSTUNREACH}
-
-
-def _probe_mount(path: Path) -> bool:
-    """True iff `path` is reachable AND writable (cheap touch-and-unlink)."""
-    try:
-        if not path.is_dir():
-            return False
-        probe = path / f".mount_probe.{os.getpid()}"
-        probe.touch()
-        probe.unlink()
-        return True
-    except OSError:
-        return False
-
-
-def _wait_for_mount(path: Path, mount_script: Path | None,
-                    poll_seconds: int = 30) -> None:
-    """Block until `path` is writable. Every other poll, try the mount script
-    (idempotent: open smb:// just re-attaches if already mounted, no-op if
-    already healthy). Designed to ride out an SMB drop and resume the same
-    day's write once the share is back, without dropping any work."""
-    attempts = 0
-    t0 = time.time()
-    while True:
-        if _probe_mount(path):
-            if attempts > 0:
-                print(f"  [mount back after {time.time() - t0:.0f}s; "
-                      f"resuming]", flush=True)
-            return
-        attempts += 1
-        if mount_script is not None and attempts % 2 == 1:
-            print(f"  [mount unreachable; auto-remount attempt {attempts}]",
-                  flush=True)
-            subprocess.run([str(mount_script)], check=False,
-                           capture_output=True)
-        else:
-            print(f"  [mount unreachable; sleeping {poll_seconds}s "
-                  f"(attempt {attempts})]", flush=True)
-        time.sleep(poll_seconds)
-
-
-def _with_mount_retry(fn, sds_root: Path, mount_script: Path | None):
-    """Run fn(); if it raises an OSError that smells like an SMB drop AND
-    the sds_root mount really is unreachable, stall until the mount is back,
-    then retry fn() ONCE more. A second failure re-raises (genuine fault)."""
-    try:
-        return fn()
-    except OSError as e:
-        if e.errno not in _MOUNT_DROP_ERRNOS:
-            raise
-        if _probe_mount(sds_root):
-            # Mount looks fine -- this OSError is something else (perms,
-            # disk full, programming error). Don't paper over it.
-            raise
-        print(f"  [OSError {e.errno} ({errno.errorcode.get(e.errno, '?')}) "
-              f"on staging write; waiting for mount]", flush=True)
-        _wait_for_mount(sds_root, mount_script)
-        return fn()  # one retry; second failure propagates
 
 
 def _on_sigint(signum, frame):
@@ -114,14 +51,23 @@ def _on_sigint(signum, frame):
     signal.signal(signal.SIGINT, signal.SIG_DFL)
 
 
-def day_already_done(sds_root, net, sta, dd) -> bool:
-    """True only if all 3 component day-files for this net.sta + date exist and are
-    non-empty. Requiring 3 means a half-written day (e.g. after a hard kill) is
-    re-done rather than skipped -- so resume never leaves a day incomplete."""
+def day_already_done_in(root, net, sta, dd) -> int:
+    """Count non-empty component day-files for this net.sta + date under <root>.
+    Used to decide skip (>=3) AND to merge buffer + remote views."""
     yr, doy = dd.year, dd.timetuple().tm_yday
-    pat = str(Path(sds_root) / f"{yr:04d}" / net / sta / "*.D"
+    pat = str(Path(root) / f"{yr:04d}" / net / sta / "*.D"
               / f"{net}.{sta}.*.D.{yr:04d}.{doy:03d}")
-    return sum(1 for f in glob.glob(pat) if os.path.getsize(f) > 0) >= 3
+    try:
+        return sum(1 for f in glob.glob(pat) if os.path.getsize(f) > 0)
+    except OSError:
+        return 0
+
+
+def day_already_done(buf: BufferedStaging, net, sta, dd) -> bool:
+    """A day is 'done' if buffer + remote together have all 3 channel files
+    (so resume covers the case where a day is mid-drain at restart)."""
+    return (day_already_done_in(buf.write_root, net, sta, dd)
+            + day_already_done_in(buf.remote, net, sta, dd)) >= 3
 
 
 def discover_days(card_root, min_date, max_date):
@@ -199,10 +145,21 @@ def main(argv):
     p.add_argument("--reprocess", action="store_true",
                    help="re-do days even if already in the SDS (default: resume / skip done days)")
     p.add_argument("--limit", type=int, default=0)
+    p.add_argument("--buffer-dir", default=None,
+                   help="local SDS buffer dir. Days are written here, then "
+                        "drained to the remote SDS root opportunistically. "
+                        "Default: a per-PID dir under /tmp.")
+    p.add_argument("--buffer-cap-mb", type=int, default=8000,
+                   help="pause USB reads when the local SDS buffer reaches "
+                        "this size in MB. Default 8000 (~8 GB, ~90 EchoPro "
+                        "days). The mount can be down this long without "
+                        "stalling production.")
     args = p.parse_args(argv[1:])
 
     if not args.scratch:
         args.scratch = f"/tmp/echopro_scratch.{os.getpid()}"
+    if not args.buffer_dir:
+        args.buffer_dir = f"/tmp/echopro_buffer.{os.getpid()}"
     min_date = date.fromisoformat(args.min_date)
     max_date = date.fromisoformat(args.max_date) if args.max_date else date.today()
 
@@ -219,18 +176,22 @@ def main(argv):
     if args.limit:
         days = days[:args.limit]
     print(f"Found {len(days)} day(s) under {args.card_root}", flush=True)
-    print(f"SDS out: {args.sds_root} | scratch: {args.scratch} | "
-          f"copy-local: {not args.no_copy} | inventory: {bool(inv)}\n",
+    print(f"SDS remote : {args.sds_root}\n"
+          f"SDS buffer : {args.buffer_dir} (cap {args.buffer_cap_mb} MB)\n"
+          f"dmx scratch: {args.scratch}\n"
+          f"copy-local : {not args.no_copy} | inventory: {bool(inv)}\n",
           flush=True)
 
     signal.signal(signal.SIGINT, _on_sigint)
     grand_tr = grand_bad = n_skip = 0
     flagged = []
     t0 = time.time()
-    sds_root_path = Path(args.sds_root)
     mount_script = Path(__file__).resolve().parent / "mount_staging.sh"
     if not mount_script.is_file():
         mount_script = None
+    buf = BufferedStaging(args.buffer_dir, args.sds_root,
+                          cap_mb=args.buffer_cap_mb,
+                          mount_script=mount_script)
     n_done = 0
     for day_dir, dd in days:
         if _STOP["flag"]:
@@ -246,11 +207,9 @@ def main(argv):
         if not net:
             print(f"  {dd}  SKIP: no network for {sta} (not in registry; pass --network)")
             continue
-        if not args.reprocess and _with_mount_retry(
-                lambda: day_already_done(args.sds_root, net, sta, dd),
-                sds_root_path, mount_script):
+        if not args.reprocess and day_already_done(buf, net, sta, dd):
             n_skip += 1
-            print(f"  {dd}  {net}.{sta}  already done -> skip")
+            print(f"  {dd}  {net}.{sta}  already done -> skip", flush=True)
             continue
 
         if args.no_copy:
@@ -263,9 +222,14 @@ def main(argv):
             files, copy_fail = robust_copy_day(day_dir, sdir)
 
         st, qc = sc.convert_suds_files(files, network=net, station=sta, inv=inv)
-        written = _with_mount_retry(
-            lambda: sc.write_sds(st, args.sds_root),
-            sds_root_path, mount_script)
+        # Write to LOCAL buffer (fast, never blocks on SMB). Then attempt to
+        # promote everything pending to staging -- if the mount is down the
+        # promote is a no-op and the day waits in the buffer for the next try.
+        written = sc.write_sds(st, str(buf.write_root))
+        buf.promote_pending()
+        # Block here only if buffer hit its cap (cap_mb-worth of unflushed
+        # days). Below the cap, just press on with the next day.
+        buf.wait_for_capacity()
         bad = len(qc["read_errors"]) + len(copy_fail)
         grand_tr += qc["n_traces"]
         grand_bad += bad
@@ -281,20 +245,33 @@ def main(argv):
         elapsed = time.time() - t0
         remaining = len(days) - (n_done + n_skip)
         eta_s = (elapsed / n_done) * remaining if n_done > 0 else 0.0
+        buf_tag = (f" buf={buf.current_mb:.0f}MB"
+                   if buf.current_mb > 1 else "")
         print(f"  {dd}  {net}.{sta} {qc['rate_hz']}Hz -> {qc['n_traces']} traces, "
               f"{len(written)} SDS files  ({day_dt:.0f}s, "
-              f"{n_done}/{len(days)-n_skip} done, ETA {eta_s/3600:.1f}h){tag}",
+              f"{n_done}/{len(days)-n_skip} done, ETA {eta_s/3600:.1f}h{buf_tag}){tag}",
               flush=True)
 
         if not args.no_copy:
             shutil.rmtree(args.scratch, ignore_errors=True)
 
+    # Drain anything left in the buffer before we exit -- otherwise the user
+    # has converted data sitting locally that never reaches staging.
+    if buf.current_mb > 0:
+        print(f"\nFinal drain: {buf.current_mb:.0f} MB still in buffer; "
+              f"draining to staging ...", flush=True)
+        ok = buf.drain_blocking(max_wait_seconds=1800)
+        if not ok:
+            print(f"  WARNING: {buf.current_mb:.0f} MB still in buffer at "
+                  f"{buf.write_root} -- re-run to retry the drain.", flush=True)
     dt = time.time() - t0
     print(f"\nTOTAL: {len(days)} day(s): {n_skip} already-done/skipped, "
-          f"{grand_tr} traces converted, {grand_bad} bad files, {dt:.1f}s")
+          f"{grand_tr} traces converted, {grand_bad} bad files, {dt:.1f}s",
+          flush=True)
     if flagged:
         print(f"QC-flagged day(s) ({len(flagged)}): "
-              + ", ".join(f"{d}({n})" for d, n, _ in flagged[:25]))
+              + ", ".join(f"{d}({n})" for d, n, _ in flagged[:25]),
+              flush=True)
     return 1 if grand_bad else 0
 
 

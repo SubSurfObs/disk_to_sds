@@ -47,6 +47,9 @@ import time
 from datetime import date
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from staging_buffer import BufferedStaging, probe_mount, _banner  # noqa: E402
+
 DAY_RE = re.compile(r"/(\d{4})/(\d{2})/(\d{2})$")
 DEFAULT_RECLEN = 512  # Gecko default; verified per-file via blockette 1000
 
@@ -514,9 +517,33 @@ def main(argv: list[str]) -> int:
                 else:
                     rsync_failures.append(f"{day_label}: {msg}")
                     print(f"    {day_label}  rsync FAIL ({msg})", flush=True)
+                _note_rsync_result(day_label, ok, msg)
             rsync_q.task_done()
 
-    nonlocal_state = {"rsync_s": 0.0}
+    nonlocal_state = {"rsync_s": 0.0, "mount_down": False, "down_since": 0.0}
+
+    def _note_rsync_result(day_label: str, ok: bool, msg: str) -> None:
+        """State transitions on rsync results -- surfaces DROPPED/RESUMED
+        banners when the mount comes and goes. Identifies a 'drop' by either
+        an explicit mount-drop errno or just by probing the remote root."""
+        if ok:
+            if nonlocal_state["mount_down"]:
+                dt = time.time() - nonlocal_state["down_since"]
+                _banner("RESUMED", f"staging mount back after {dt:.0f} s "
+                        f"(first success on {day_label})")
+                nonlocal_state["mount_down"] = False
+            return
+        # Failure -- distinguish mount drop from a real fault.
+        looks_dropped = (any(k in msg.lower() for k in
+                             ("not connected", "no such file", "input/output",
+                              "broken pipe", "host is down", "timed out"))
+                        or not probe_mount(remote_root))
+        if looks_dropped and not nonlocal_state["mount_down"]:
+            nonlocal_state["mount_down"] = True
+            nonlocal_state["down_since"] = time.time()
+            _banner("DROPPED", f"staging mount unreachable while rsyncing "
+                    f"{day_label}; local files kept for end-of-run drain")
+
     worker: threading.Thread | None = None
     if pipelined:
         worker = threading.Thread(target=_rsync_worker, name="rsync-worker", daemon=True)
@@ -561,11 +588,29 @@ def main(argv: list[str]) -> int:
                     else:
                         rsync_failures.append(f"{day_label}: {msg}")
                         print(f"    {day_label}  rsync FAIL ({msg})", flush=True)
+                    _note_rsync_result(day_label, ok, msg)
     finally:
         if worker is not None:
             rsync_q.put(None)
             worker.join()
             grand_rsync_s = nonlocal_state["rsync_s"]
+
+    # Final drain: any day-channel files still in local scratch were either
+    # failed rsyncs (mount drop) or --keep-local. Try to push them to staging
+    # now using the shared buffer-and-drain helper, with auto-remount.
+    if remote_root is not None and not args.keep_local:
+        mount_script = Path(__file__).resolve().parent / "mount_staging.sh"
+        if not mount_script.is_file():
+            mount_script = None
+        drain_buf = BufferedStaging(sds_root, remote_root,
+                                    cap_mb=10**9, mount_script=mount_script)
+        if drain_buf.current_mb > 0:
+            print(f"\nFinal drain: {drain_buf.current_mb:.0f} MB still in local "
+                  f"scratch; promoting to staging ...", flush=True)
+            ok = drain_buf.drain_blocking(max_wait_seconds=1800)
+            if not ok:
+                print(f"  WARNING: {drain_buf.current_mb:.0f} MB still in "
+                      f"{sds_root} -- re-run to retry the drain.", flush=True)
 
     dt_total = time.time() - t0
     mb_total = grand_bytes / (1024 * 1024)
