@@ -398,6 +398,10 @@ def main(argv: list[str]) -> int:
                         "Default: ../../sds_staging_ledger/cards.")
     p.add_argument("--no-card-json", action="store_true",
                    help="don't stamp card.json after the pull.")
+    p.add_argument("--no-autocommit", action="store_true",
+                   help="don't git-commit/push the stamped card.json to the "
+                        "ledger repo (default: auto-commit so the ledger stays "
+                        "converged across Mac/VM/dev1).")
     p.add_argument("--network", default=None,
                    help="override the SEED network field on every record (bytes "
                         "18:20 of each 512 B MSEED record). Use for cards whose "
@@ -681,6 +685,23 @@ def main(argv: list[str]) -> int:
                                  location_override=args.location)
         except Exception as e:  # stamping must never fail a good pull
             print(f"card.json: stamp skipped ({e})")
+
+    # Auto-commit the (possibly-) updated card.json. We stage the whole card
+    # dir (cheap) so any companion files from rename_card stage 0 that didn't
+    # get pushed (e.g. offline rename) also get committed now.
+    if not args.no_autocommit and not args.no_card_json:
+        cards_root = Path(args.cards_root)
+        if cards_root.is_dir():
+            try:
+                sys.path.insert(0, str(cards_root.parent.resolve()))
+                from ledger_git import commit_and_push
+                commit_and_push(
+                    repo_dir=cards_root.parent,
+                    paths=[cards_root],
+                    message="pull: card.json stamps (stage 1)",
+                )
+            except Exception as e:
+                print(f"ledger autocommit skipped ({type(e).__name__}: {e})")
     return 0
 
 

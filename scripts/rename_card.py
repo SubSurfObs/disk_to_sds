@@ -140,6 +140,10 @@ def main(argv: list[str]) -> int:
                    help="don't extract the per-card settings epoch + change "
                         "history (default: extract; reads ~6k hourly .ss files "
                         "off the card, can take a few minutes on slow media).")
+    p.add_argument("--no-autocommit", action="store_true",
+                   help="don't git-commit/push the new card.json + .ss files "
+                        "to the ledger repo at the end of a --commit run "
+                        "(default: auto-commit so the ledger stays converged).")
     args = p.parse_args(argv[1:])
 
     # Resolve volume.
@@ -271,6 +275,21 @@ def main(argv: list[str]) -> int:
                         commit=True, network_override=args.network)
         except Exception as e:
             print(f"settings-history: extraction skipped ({type(e).__name__}: {e})")
+
+    # Auto-commit the new card dir (card.json + the .ss history files) to the
+    # ledger repo. Cards-root lives inside the ledger checkout (cards/...), so
+    # the repo root is its parent. Best-effort; never fails the rename.
+    if not args.no_autocommit and cards_root.is_dir() and card_dir.exists():
+        try:
+            sys.path.insert(0, str(cards_root.parent.resolve()))
+            from ledger_git import commit_and_push
+            commit_and_push(
+                repo_dir=cards_root.parent,
+                paths=[card_dir],
+                message=f"rename: {net}.{sta} card {card_id} (stage 0)",
+            )
+        except Exception as e:
+            print(f"ledger autocommit skipped ({type(e).__name__}: {e})")
 
     return 0
 
