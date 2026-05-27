@@ -131,6 +131,11 @@ def main(argv: list[str]) -> int:
                    help="override the network code from settings.ss (e.g. VW). "
                         "Use for cards that predate the FDSN VW assignment — "
                         "the settings.ss network is then obsolete.")
+    p.add_argument("--location", default=None,
+                   help="override the location code from settings.ss (e.g. 00). "
+                        "Use when the Gecko was misconfigured with empty/spaces "
+                        "location_id. VW policy: primary sensor = '00'. "
+                        "This flag mirrors gecko_sdcard_to_sds.py --location.")
     p.add_argument("--no-settings-history", action="store_true",
                    help="don't extract the per-card settings epoch + change "
                         "history (default: extract; reads ~6k hourly .ss files "
@@ -164,7 +169,8 @@ def main(argv: list[str]) -> int:
     sta = s.get("sitename", "").strip()
     net_in_ss = s.get("network_code", "").strip()
     net = args.network.strip() if args.network else net_in_ss
-    loc = s.get("location_id", "").strip()
+    loc_in_ss = s.get("location_id", "").strip()
+    loc = args.location.strip() if args.location else loc_in_ss
     serial = s.get("serial", "").strip()
     rate = s.get("sampling_rate", "").strip()
     if not (sta and serial):
@@ -185,8 +191,13 @@ def main(argv: list[str]) -> int:
     cur_name = vol.name
     print(f"Volume        : {vol}  (current label: {cur_name!r})")
     print(f"Filesystem    : {fs}")
-    net_note = "" if (not args.network or net == net_in_ss) else f"  [override; settings.ss said {net_in_ss!r}]"
-    print(f"Station/serial : {net}.{sta}  serial {serial} ({serial4}), {rate} Hz, loc {loc}{net_note}")
+    net_note = "" if (not args.network or net == net_in_ss) else f"  [net override; settings.ss said {net_in_ss!r}]"
+    loc_note = "" if (not args.location or loc == loc_in_ss) else f"  [loc override; settings.ss said {loc_in_ss!r}]"
+    print(f"Station/serial : {net}.{sta}  serial {serial} ({serial4}), {rate} Hz, loc {loc!r}{net_note}{loc_note}")
+    if not args.location and not loc_in_ss:
+        print("WARNING: settings.ss has empty location_id. VW policy requires "
+              "loc='00'. Re-run rename with --location 00 (and pass --location 00 "
+              "to gecko_sdcard_to_sds.py at pull time too).")
     print(f"Data span     : {start} -> {end}")
     print(f"Ledger card-id : {card_id}   (cards/{net}.{sta}/{card_id}/)")
     print(f"New volume label: {label!r}   [{label_kind}]")
@@ -239,6 +250,8 @@ def main(argv: list[str]) -> int:
             }
             if args.network and net != net_in_ss:
                 rec["net_override"] = {"from_settings_ss": net_in_ss, "applied": net}
+            if args.location and loc != loc_in_ss:
+                rec["location_override"] = {"from_settings_ss": loc_in_ss, "applied": loc}
             print(f"Created {card_path}")
         card_dir.mkdir(parents=True, exist_ok=True)
         card_path.write_text(json.dumps(rec, indent=2, sort_keys=True) + "\n")
