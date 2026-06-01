@@ -80,13 +80,24 @@ def convert_suds_files(files, network, station, inv=None):
     out = Stream()
     dropped: set = set()
     read_errors: list = []
+    # Recovered-but-incomplete files: sudspy now reads tolerantly (strict=False),
+    # recovering valid waveform channels and stopping at trailing junk / genuine
+    # truncation. We capture the per-file stop diagnostics so the day-level QC can
+    # tell "trailing junk, fully recovered" (bad_sync, small trailing) from
+    # "truncated mid-data, partial recovery" (short_data) — the latter is real
+    # data loss worth flagging.
+    recovered: list = []
     rate = None
     for f in files:
+        diag: dict = {}
         try:
-            raw = sudspy.read_suds_stream(str(f))
+            raw = sudspy.read_suds_stream(str(f), diag=diag)
         except Exception as e:
             read_errors.append((str(f), f"{type(e).__name__}: {e}"))
             continue
+        if diag.get("stop_reason") not in (None, "clean_eof"):
+            recovered.append((str(f), diag.get("stop_reason"),
+                              diag.get("n_blocks"), diag.get("last_good_offset")))
         for tr in raw:
             orient = ECHOPRO_ORIENT.get(tr.stats.channel)
             if orient is None:
@@ -100,7 +111,9 @@ def convert_suds_files(files, network, station, inv=None):
             tr.stats.channel = cha
             out += tr
     qc = {"read_errors": read_errors, "dropped_components": sorted(dropped),
-          "rate_hz": rate, "n_traces": len(out)}
+          "rate_hz": rate, "n_traces": len(out),
+          "recovered_files": recovered,
+          "n_recovered": len(recovered)}
     return out, qc
 
 
