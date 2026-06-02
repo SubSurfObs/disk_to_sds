@@ -184,6 +184,69 @@ SeisComp pipeline shows ratios ~2.0 in discrete intervals (TRPU CHZ: 53 days at
 ~1.99 across 2026-02-26→03-18 and 2026-04-10 on) — that SD-vs-pipeline contrast
 is the case made to the upstream operator.
 
+## Midnight-boundary fix + a naming wart to clean up
+
+SRC minute-files straddle midnight (named by start-time + constant `SS`
+offset), so the first ~`SS` s of each day live only in the prior day's last
+file. The old `write_sds` clobbered/misfiled that sliver — ~3.65 hr/station-yr
+lost at SS=12, invisible to duration-ratio QC. Fixed in
+`scripts/suds_convert.py:write_sds` (`@00b6835`): split-by-UTC-day +
+merge-on-write, idempotent; regression test `scripts/test_boundary_write_sds.py`.
+Discovered by the eqserver sweep 2026-06-02. **Still owed:**
+`gecko_sdcard_to_sds.py:process_day` has the same bug via its raw-record/
+directory-routing path (fix = route records by SEED header start-time); plus the
+VM `disk_to_sds` git reconcile so the sweep's checkout gets `@00b6835`.
+
+**Naming wart (deferred, tracked):** `write_sds` (+ `_sds_day_path_for`,
+`_split_trace_by_utc_day`, atomic plumbing) lives in `suds_convert.py` but has
+**nothing to do with SUDS** — it's the generic SDS writer every eqserver phase3
+branch (gecko/minimus/mseed/echopro) calls. Gecko data is read by ObsPy and
+merely *written* by it, not SUDS-parsed. Plan: split into a new `sds_writer.py`
+(generic writer) vs. `suds_convert.py` (SUDS reader only). Deferred to a
+dedicated pure-rename PR **after the eqserver sweep stabilises** — it changes
+import paths in both repos; don't conflate with the data-loss fix. See memory
+`split-sds-writer-from-suds-convert`.
+
+## Future work: generic pre-downloaded-MiniSEED adapter (`miniseed_to_sds.py`)
+
+A planned third "disk source" (after Gecko SD + EchoPro USB): an
+**ingest-pre-downloaded-files** adapter. Point it at a `.mseed` file or a
+dir/glob; it routes each record to its SDS day-file by SEED header + record
+start-time, dedups records, writes atomically to staging. **No conversion**
+(input is already MiniSEED) and **no fetch** (files arrive out-of-band). The
+record-routing core is the same logic as `gecko_sdcard_to_sds.py:process_day`;
+worth extracting into a shared module both call.
+
+Primary motivation is **gap-patching** where slarchive failed, so
+`apply.py --mode decide` (gap-fill: write missing / override partial / skip
+complete) is the natural promotion mode -- the first source where decide-mode is
+the main path, not the exception.
+
+Design decisions already settled:
+- **First/only consumer: seismosphere.net** -- manual web download (NO scriptable
+  API, confirmed), occasional pathway. Used when slarchive->LT dropped data but
+  Seismosphere's longer direct-download buffer (vs its seedlink server) still has
+  it. Optimise for correctness + clear per-day reporting over a few files, not
+  throughput; no buffering/pipelining/overnight runs.
+- **Provenance is run-shaped, not card-shaped** -- no serial / settings.ss /
+  volume label, so no `card.json`. `source.kind = "seismosphere"` (or generic),
+  interval-based fields (`request` net/sta/loc/cha + start/end, `downloaded_at`,
+  `service`), carried via the ledger's `--source-extra-json` mechanism.
+- **Day-boundary routing** by record start-time (scart/slarchive convention).
+- **Dedup is mandatory** -- overlapping downloads of the same day would otherwise
+  duplicate records and inflate the duration ratio (same signature as the TRPU
+  LT-doubling). Hash each record; skip dupes when assembling a day-file.
+- **Overrides default OFF** -- Seismosphere returns real FDSN data with correct
+  net/loc codes (unlike the pre-FDSN Gecko tranche); flags stay available.
+- **Reuse the duration-ratio QC** -- a patched day showing ratio >1.0 means dedup
+  failed; catch before apply.
+- **Generic by design** -- Seismosphere is just one source of "MiniSEED on disk";
+  the same tool ingests FDSN dataselect dumps or scattered `.mseed`.
+
+Blocked only on a sample of what seismosphere.net's download button produces
+(one file vs many, reclen, code correctness, day alignment, filename convention)
+to pin discovery + dedup keys.
+
 ## User collaboration preferences
 
 - Terse responses. No long preambles.
