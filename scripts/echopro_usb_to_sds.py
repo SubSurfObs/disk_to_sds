@@ -70,16 +70,23 @@ def day_already_done(buf: BufferedStaging, net, sta, dd) -> bool:
             + day_already_done_in(buf.remote, net, sta, dd)) >= 3
 
 
-def discover_days(card_root, min_date, max_date):
-    """Find day-dirs under the known EchoPro layout: <card>/cont*/YYYY/MM/DD.
+def discover_days(card_root, min_date, max_date, rings=("cont0",)):
+    """Find day-dirs under the known EchoPro layout: <card>/<ring>/YYYY/MM/DD.
 
     We DON'T rglob -- the card has ~3M files (98 days * 24h * ~1440 .dmx) and
     walking them all takes many minutes on a slow USB. Instead we iterdir at
-    exactly 4 levels (cont*/Y/M/D) which is O(~100) stat calls."""
+    exactly 4 levels (<ring>/Y/M/D) which is O(~100) stat calls.
+
+    ONLY the rings in `rings` are walked (default cont0 = the continuous
+    seismometer). EchoPro is a 6-ch recorder with arbitrarily-named cont<N>
+    processor rings; non-cont0 rings are accelerometer / triggered-event /
+    junk data we do NOT ingest (triggers are re-derivable STA/LTA). See memory
+    echopro-rings-cont0-only."""
     days, skipped = [], []
     base = Path(card_root)
+    want = set(rings)
     for cont in sorted(p for p in base.iterdir()
-                       if p.is_dir() and p.name.startswith("cont")):
+                       if p.is_dir() and p.name in want):
         for y in sorted(p for p in cont.iterdir()
                         if p.is_dir() and p.name.isdigit()):
             for mo in sorted(p for p in y.iterdir()
@@ -137,6 +144,14 @@ def main(argv):
     p.add_argument("--inventory", default=None, help="StationXML for channel-by-rate (optional)")
     p.add_argument("--min-date", default="2015-01-01")
     p.add_argument("--max-date", default=None)
+    p.add_argument("--ring", default="cont0",
+                   help="comma-separated EchoPro processor ring(s) to ingest. "
+                        "Default cont0 = the continuous seismometer record. "
+                        "Other cont<N> rings (accelerometer / triggered-event / "
+                        "junk -- ring names are arbitrary recorder-config labels) "
+                        "are NOT ingested by default; triggers are re-derivable "
+                        "STA/LTA. Override only if you know a specific ring holds "
+                        "wanted continuous data. See memory echopro-rings-cont0-only.")
     p.add_argument("--scratch", default=None,
                    help="per-day scratch dir for the .dmx copy. Default: a "
                         "per-PID dir under /tmp (so concurrent runs can't "
@@ -168,8 +183,10 @@ def main(argv):
         from obspy import read_inventory
         inv = read_inventory(args.inventory)
 
-    print(f"Discovering day-dirs under {args.card_root} ...", flush=True)
-    days, skipped = discover_days(args.card_root, min_date, max_date)
+    rings = tuple(r.strip() for r in args.ring.split(",") if r.strip())
+    print(f"Discovering day-dirs under {args.card_root} (rings: {', '.join(rings)}) ...",
+          flush=True)
+    days, skipped = discover_days(args.card_root, min_date, max_date, rings=rings)
     if skipped:
         print(f"Skipping {len(skipped)} out-of-window/invalid day-dir(s) "
               f"(e.g. {skipped[0][1]})", flush=True)
