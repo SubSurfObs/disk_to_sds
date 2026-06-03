@@ -106,18 +106,43 @@ def discover_days(card_root, min_date, max_date, rings=("cont0",)):
 
 
 def station_from_files(day_dir):
-    """EchoPro filename = YYYY-MM-DD_HHMM_SS_STA.dmx -> STA."""
-    for f in day_dir.rglob("*.dmx"):
-        m = STA_RE.match(f.name)
-        if m:
-            return m.group(1)
+    """EchoPro filename = YYYY-MM-DD_HHMM_SS_STA.dmx -> STA. Tolerates corrupt
+    USB dir entries (os.walk skips a bad scandir instead of raising)."""
+    for root, _dirs, names in os.walk(str(day_dir), onerror=lambda e: None):
+        for nm in names:
+            if nm.endswith(".dmx"):
+                m = STA_RE.match(nm)
+                if m:
+                    return m.group(1)
     return None
 
 
+def _walk_dmx_tolerant(day_dir):
+    """Yield *.dmx paths under day_dir, tolerating corrupt FAT/exFAT directory
+    entries (dangling names with no valid inode -- common on flaky USB sticks
+    left by an unclean unmount). os.walk(onerror=...) keeps going past a
+    scandir failure instead of letting the exception abort the whole run, the
+    way Path.rglob() does. Returns (paths, walk_errors)."""
+    out, walk_errors = [], []
+    def _onerr(err):
+        walk_errors.append(f"{getattr(err, 'filename', '?')}: {err}")
+    for root, _dirs, names in os.walk(str(day_dir), onerror=_onerr):
+        for nm in names:
+            if nm.endswith(".dmx"):
+                out.append(Path(root) / nm)
+    return sorted(out), walk_errors
+
+
 def robust_copy_day(day_dir, scratch, retries=2):
-    """Copy a day's .dmx to scratch; verify size; retry. Returns (files, failures)."""
+    """Copy a day's .dmx to scratch; verify size; retry. Returns (files, failures).
+
+    The directory WALK itself is fault-tolerant: a corrupt dir entry on the USB
+    is recorded as a failure and skipped, not allowed to crash the whole run.
+    Per-file copies that error (transient USB read) are retried then recorded."""
     out, failures = [], []
-    for src in sorted(day_dir.rglob("*.dmx")):
+    paths, walk_errors = _walk_dmx_tolerant(day_dir)
+    failures.extend(f"<walk> {e}" for e in walk_errors)
+    for src in paths:
         dst = scratch / src.name
         ok = False
         for _ in range(retries + 1):
@@ -230,7 +255,7 @@ def main(argv):
             continue
 
         if args.no_copy:
-            files, copy_fail = sorted(day_dir.rglob("*.dmx")), []
+            files, copy_fail = _walk_dmx_tolerant(day_dir)
         else:
             sdir = Path(args.scratch)
             if sdir.exists():
