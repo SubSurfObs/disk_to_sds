@@ -134,9 +134,15 @@ def main(argv):
     dates = sorted(dd for _p, dd in days)
     start, end = dates[0], dates[-1]
 
-    sta = epu.station_from_files(days[0][0])
+    # Scan multiple days for the station -- early day-dirs are often empty
+    # (recorder power stubs), so the first one alone can yield nothing.
+    sta = None
+    for day_dir, _dd in days:
+        sta = epu.station_from_files(day_dir)
+        if sta:
+            break
     if not sta:
-        print("Could not resolve station from filenames.")
+        print("Could not resolve station from filenames (scanned all day-dirs).")
         return 2
     net = args.network or sc.network_for_station(sta, args.registry) or "XX"
     card_id = f"{start:%Y%m%d}-{end:%Y%m%d}"  # SPAN ONLY -- no serial suffix
