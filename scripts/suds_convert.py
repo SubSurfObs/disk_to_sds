@@ -208,7 +208,25 @@ def write_sds(stream, sds_root, encoding="STEIM2", reclen=512):
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".partial")
         _to_int32(s)
-        s.write(str(tmp), format="MSEED", encoding=encoding, reclen=reclen)
+        try:
+            s.write(str(tmp), format="MSEED", encoding=encoding, reclen=reclen)
+        except Exception as e:
+            # STEIM2 encodes sample-to-sample DIFFERENCES (<=30 bits). A single
+            # garbage/glitch sample (digitizer bit-error) can produce a jump too
+            # large to encode, which would otherwise abort the entire run. Fall
+            # back to INT32 (uncompressed, lossless, no difference limit) so the
+            # day is PRESERVED (glitch and all) rather than dropped. ~3.4x size
+            # for that one day; flagged for QC.
+            if encoding in ("STEIM1", "STEIM2"):
+                print(f"  write_sds: {path.name} failed {encoding} encode ({e}); "
+                      f"falling back to INT32 (lossless, glitch sample preserved)")
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
+                s.write(str(tmp), format="MSEED", encoding="INT32", reclen=reclen)
+            else:
+                raise
         os.replace(tmp, path)
         written.append((path, path.stat().st_size))
     return written
