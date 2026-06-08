@@ -235,6 +235,8 @@ def main(argv):
                           cap_mb=args.buffer_cap_mb,
                           mount_script=mount_script)
     n_done = 0
+    consec_nostation = 0
+    card_root_probe = Path(args.card_root)
     for day_dir, dd in days:
         if _STOP["flag"]:
             print(f"  -- stop requested; exiting cleanly before {dd} (re-run to resume) --",
@@ -243,8 +245,21 @@ def main(argv):
         day_t0 = time.time()
         sta = args.station or station_from_files(day_dir)
         if not sta:
+            consec_nostation += 1
+            # A long run of "no station" usually means the card VANISHED
+            # (USB dismounted / went to sleep), not that the days are empty.
+            # Silently skipping the rest would falsely report success. If we've
+            # hit a streak AND the card root is no longer readable, abort loudly.
+            if consec_nostation >= 5 and not card_root_probe.is_dir():
+                print(f"\nABORT: {consec_nostation} consecutive 'no station' skips AND "
+                      f"card root {card_root_probe} is no longer readable -- the USB "
+                      f"likely dismounted (sleep/power/flaky media). Stopping rather "
+                      f"than false-skipping the rest. Reseat the card and re-run "
+                      f"(resume-by-default keeps completed days).", flush=True)
+                return 2
             print(f"  {dd}  SKIP: no station in filenames")
             continue
+        consec_nostation = 0
         net = args.network or sc.network_for_station(sta, args.registry)
         if not net:
             print(f"  {dd}  SKIP: no network for {sta} (not in registry; pass --network)")
