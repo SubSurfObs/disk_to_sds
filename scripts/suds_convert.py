@@ -25,6 +25,11 @@ import sudspy
 
 # EchoPro component -> SEED orientation (Kelunji EchoPro user manual)
 ECHOPRO_ORIENT = {"c01": "N", "c02": "E", "c03": "Z"}  # c04 = microphone -> excluded
+# Echo (older Kelunji sibling) channel naming. Velocity ("-T" = Translation) is
+# kept; accelerometer ("-A") falls through to dropped[] (consistent with c04+
+# being excluded on EchoPro). Without this, Echo-format files drop ALL channels
+# (incl. velocity) -> traces=0 -> silent end-to-end data loss.
+ECHO_ORIENT = {"Up-T": "Z", "North-T": "N", "East-T": "E"}
 INSTRUMENT = "H"  # high-gain seismometer
 
 
@@ -99,7 +104,9 @@ def convert_suds_files(files, network, station, inv=None):
             recovered.append((str(f), diag.get("stop_reason"),
                               diag.get("n_blocks"), diag.get("last_good_offset")))
         for tr in raw:
-            orient = ECHOPRO_ORIENT.get(tr.stats.channel)
+            # EchoPro (c01/c02/c03) first, then Echo (Up-T/North-T/East-T).
+            orient = (ECHOPRO_ORIENT.get(tr.stats.channel)
+                      or ECHO_ORIENT.get(tr.stats.channel))
             if orient is None:
                 dropped.add(tr.stats.channel)
                 continue
