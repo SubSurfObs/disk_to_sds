@@ -9,3 +9,14 @@ local_sds/*
 # Plan files are ephemeral; durable manifests in manifests/*.jsonl are tracked
 manifests/plans/*
 !manifests/plans/.gitkeep
+
+# Standard Python / dev-environment ignores
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.pytest_cache/
+.DS_Store
+
+# Per-session Claude config (operator-local, not a project artefact)
+.claude/
