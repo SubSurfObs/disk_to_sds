@@ -207,10 +207,14 @@ def write_sds(stream, sds_root, encoding="STEIM2", reclen=512):
                 print(f"  write_sds: existing {path.name} unreadable ({e}); "
                       f"moved to {bad.name}, writing fresh from new data")
         _to_int32(s)
-        # method=1: where samples overlap (the re-run / boundary case), keep one
-        # copy -- deduplicates the straddle sliver instead of doubling it.
-        s.merge(method=1)
-        s = s.split()           # break any gaps back into discrete traces
+        # sudspy.fast_merge_split replaces stream.merge(method=1) + split()
+        # for ~10-500x speedup at large trace counts (O(N log N) vs O(N^2)).
+        # Byte-equal output verified on HOLS clean SUDS day. See sudspy
+        # handoff 2026-06-22 + commits 81dbd1a (fast_merge_split) /
+        # 20c48b4 (latest pin). overlap='trim' matches method=1 semantics
+        # for real seismic data where overlaps are sub-sample drift.
+        import sudspy
+        s = sudspy.fast_merge_split(s, overlap="trim")
         s.sort(["starttime"])
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".partial")
