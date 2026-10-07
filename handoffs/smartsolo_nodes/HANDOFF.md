@@ -14,7 +14,7 @@ One harvest (P7) has been fully processed by hand; everything below is
 measured from it, not assumed.
 
 - Deployment/instrument project (naming, serials, StationXML):
-  `~/projects/SubSurfObs/korum_02102026/HANDOFF_DEPLOYMENT.md`
+  `~/projects/SubSurfObs/Arawata_earthquake/HANDOFF_DEPLOYMENT.md`
 - Working prototype converter (single station, also does the 100 Hz
   derivative): `~/projects/SubSurfObs/quake-fetch/inspection/k180_reloc/build_p7_sds.py`
 - Reference harvest to test against: `~/Desktop/ss_test/p7/`
@@ -53,7 +53,7 @@ Waveform facts (all verified on P7):
 1. **Identify** (cf. `identify_echopro.py`): read serial from
    `device.ini`, GPS median from `DigiSolo.LOG`, device type, record
    window. **Reconcile serial → station** by nearest-site match against
-   the registry (`korum_02102026/rdk/sites.csv`; field pins good to tens
+   the registry (`Arawata_earthquake/rdk/sites.csv`; field pins good to tens
    of metres, so matching is unambiguous — this also resolves the sites
    where the serial wasn't written down). Maintain the serial↔site table
    as a durable manifest.
@@ -90,7 +90,7 @@ Waveform facts (all verified on P7):
   archive currently lives locally at
   `quake-fetch/quake-archive/korumburra_seq` (its `_p7_sds/` tree is the
   P7 100 Hz SDS already in use).
-- `korum_02102026` repo is read-only for Claude sessions unless Dan
+- `Arawata_earthquake` repo is read-only for Claude sessions unless Dan
   explicitly asks (its registry is an *input* here, never a write target).
 - Node responses are mock/uncalibrated until the deployment project
   delivers real poles & zeros — amplitudes from node SDS are not usable
