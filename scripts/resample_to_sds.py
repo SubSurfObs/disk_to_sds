@@ -89,9 +89,19 @@ def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
         info["status"] = "no native input"
         return None, out_path, info
 
-    # decimate native
+    # CONSOLIDATE native first, THEN decimate. The native high-rate records
+    # carry ~1 ms sub-sample OVERLAPS at their boundaries (GPS-disciplined
+    # timing jitter), so read() returns thousands of fragments (FHZ day 278:
+    # 11,110 traces, net -16.6 s of overlap). merge(method=1) resolves the
+    # overlaps into continuous data; split() then yields segments broken only
+    # at REAL (positive) gaps. Decimating the continuous trace -- not the
+    # fragments -- avoids a FIR edge transient at every boundary and produces
+    # clean, few-trace output (the "1 trace, no masked data" the consumer wants).
+    native = read(str(src))
+    native.merge(method=1)
+    native = native.split()
     decimated = Stream()
-    for tr in read(str(src)):
+    for tr in native:
         decimated += stepwise_decimate(tr, args.target_sr)
     for tr in decimated:
         tr.stats.network, tr.stats.station = net, sta
