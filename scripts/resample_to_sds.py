@@ -75,55 +75,71 @@ def stepwise_decimate(tr, target_sr: float):
     return out
 
 
-def consolidate_overlapping(traces, sr, max_gap_samples=0):
-    """Fast O(n) stitch of same-rate records that sub-sample-OVERLAP at their
-    boundaries (GPS timing jitter) into continuous Traces.
+def consolidate_overlapping(traces, sr, bridge_samples):
+    """Grid-place same-rate records (timing-correct) and stitch the sub-sample
+    boundary jitter into continuous traces.
 
     Native high-rate day-files come back from read() as thousands of ~8 s
-    fragments separated by ~1 ms (sub-sample) overlaps; ObsPy merge(method=1)
-    resolves them but is pathologically slow at that count. Here each record is
-    placed on an integer sample grid relative to the earliest start; the
-    overlapping head-samples of a later record are dropped (earlier record
-    wins). A real forward gap (> max_gap_samples) closes the current segment and
-    opens a new one. Returns a Stream of unmasked, strictly-contiguous Traces
-    (one per real-gap-separated span)."""
+    records whose stated boundaries carry ~1 ms (±2-sample) GPS-timestamp
+    jitter -> thousands of micro over/under-laps. Each record is placed at its
+    TRUE sample index (round((start-t0)*sr)); overlaps are overwritten
+    (later record wins). Positive-gap holes are then classified: a hole
+    <= bridge_samples is the jitter artifact and is filled by linear
+    interpolation across its two neighbours; a larger hole is a REAL data gap
+    and is left unfilled so the trace splits there. Returns
+    (Stream of contiguous traces, n_bridged, n_real_gaps).
+
+    O(total samples); avoids ObsPy merge(method=1), which is pathologically slow
+    on ~11k overlapping traces. bridge_samples=0 preserves every hole (faithful).
+    """
     traces = sorted((t for t in traces if t.stats.npts), key=lambda t: t.stats.starttime)
     if not traces:
-        return Stream()
+        return Stream(), 0, 0
     dt = 1.0 / sr
     t0 = traces[0].stats.starttime
     proto = traces[0].stats
-    segments = []            # (start_idx, [arrays])
-    run_start = run_end = None
-    pieces = None
+    dtype = traces[0].data.dtype
+    placements, end_idx = [], 0
     for tr in traces:
-        data = tr.data
-        idx = int(round((tr.stats.starttime - t0) / dt))
-        if run_start is None:
-            run_start, run_end, pieces = idx, idx + len(data), [data]
-            continue
-        if idx <= run_end + max_gap_samples:          # contiguous or overlapping
-            overlap = run_end - idx
-            if overlap >= len(data):
-                continue                               # wholly inside current run
-            if overlap > 0:
-                data = data[overlap:]
-            pieces.append(data)
-            run_end += len(data)
-        else:                                          # real gap -> new segment
-            segments.append((run_start, pieces))
-            run_start, run_end, pieces = idx, idx + len(data), [data]
-    if pieces:
-        segments.append((run_start, pieces))
+        i = max(0, int(round((tr.stats.starttime - t0) / dt)))
+        placements.append((i, tr.data))
+        end_idx = max(end_idx, i + len(tr.data))
+    buf = np.zeros(end_idx, dtype=dtype)
+    filled = np.zeros(end_idx, dtype=bool)
+    for i, data in placements:
+        buf[i:i + len(data)] = data
+        filled[i:i + len(data)] = True
+
+    def _runs(mask):
+        d = np.diff(mask.astype(np.int8))
+        starts = list(np.where(d == 1)[0] + 1)
+        ends = list(np.where(d == -1)[0] + 1)
+        if mask[0]:
+            starts = [0] + starts
+        if mask[-1]:
+            ends = ends + [len(mask)]
+        return list(zip(starts, ends))
+
+    n_bridged = n_real = 0
+    if not filled.all():
+        for s, e in _runs(~filled):
+            if 0 < s and e < end_idx and (e - s) <= bridge_samples:   # jitter hole
+                buf[s:e] = np.round(np.interp(np.arange(s, e), [s - 1, e],
+                                              [float(buf[s - 1]), float(buf[e])])).astype(dtype)
+                filled[s:e] = True
+                n_bridged += 1
+            else:
+                n_real += 1
+
     out = Stream()
-    for start_idx, arrs in segments:
-        tr = Trace(data=np.concatenate(arrs))
+    for s, e in _runs(filled):
+        tr = Trace(data=buf[s:e].copy())
         tr.stats.network, tr.stats.station = proto.network, proto.station
         tr.stats.location, tr.stats.channel = proto.location, proto.channel
         tr.stats.sampling_rate = sr
-        tr.stats.starttime = t0 + start_idx * dt
+        tr.stats.starttime = t0 + s * dt
         out.append(tr)
-    return out
+    return out, n_bridged, n_real
 
 
 def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
@@ -151,8 +167,13 @@ def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
     for tr in native:
         by_native_sr[tr.stats.sampling_rate].append(tr)
     decimated = Stream()
+    n_bridged = n_real = 0
     for nsr, trs in by_native_sr.items():
-        for seg in consolidate_overlapping(trs, nsr):
+        bridge = int(round(args.bridge_gap_s * nsr))
+        segs, nb, nr = consolidate_overlapping(trs, nsr, bridge)
+        n_bridged += nb
+        n_real += nr
+        for seg in segs:
             decimated += stepwise_decimate(seg, args.target_sr)
     for tr in decimated:
         tr.stats.network, tr.stats.station = net, sta
@@ -177,7 +198,8 @@ def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
 
     rates = sorted({tr.stats.sampling_rate for tr in final})
     info.update(status="ok", folded_existing_lt=folded, traces=len(final),
-                npts=sum(tr.stats.npts for tr in final), rates=rates)
+                npts=sum(tr.stats.npts for tr in final), rates=rates,
+                bridged=n_bridged, real_gaps=n_real)
     return final, out_path, info
 
 
@@ -197,7 +219,8 @@ def process_day(day, args) -> int:
             print(f"  {info['src']} -> {info['out']}: {info['status']}")
             continue
         tag = (f"{info['out']}: {info['traces']} trace(s), {info['npts']:,} samp, "
-               f"rates={info['rates']}" + ("  (+folded LT blip)" if info["folded_existing_lt"] else ""))
+               f"rates={info['rates']}, bridged={info['bridged']} real_gaps={info['real_gaps']}"
+               + ("  (+folded LT blip)" if info["folded_existing_lt"] else ""))
         if args.dry_run:
             print(f"  [dry] would write {out_path.name}  {tag}")
             continue
@@ -222,6 +245,11 @@ def main(argv):
     p.add_argument("--out-band", default="CH", help="output 2-char band code (e.g. CH)")
     p.add_argument("--comps", default="ZNE", help="components to process (default ZNE)")
     p.add_argument("--target-sr", type=float, default=250.0)
+    p.add_argument("--bridge-gap-s", type=float, default=0.002,
+                   help="fill positive-gap holes shorter than this (seconds) -- the "
+                        "sub-sample GPS-timestamp jitter at native record boundaries; "
+                        "larger holes stay as real gaps. 0 = faithful (bridge nothing). "
+                        "Default 0.002 (2 ms; native jitter is ~1.1 ms).")
     p.add_argument("--window-start", default="2026-10-04T00:00:00",
                    help="do not resample native data before this UTC time")
     p.add_argument("--reclen", type=int, default=512)
