@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+from collections import defaultdict
 from pathlib import Path
 
 from obspy import Stream, UTCDateTime, read
@@ -104,8 +105,20 @@ def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
         combined = read(str(existing_lt)) + decimated
         folded = True
 
-    combined.merge(method=0)       # consolidate contiguous; masks internal gaps
-    final = combined.split()       # re-break masked -> unmasked segments (no masks to writer)
+    # Merge ONLY within a sampling-rate group: a folded-in native segment at a
+    # different rate (e.g. the 500 Hz day-277 blip) must survive as its own
+    # trace -- ObsPy refuses to merge same-id traces of differing sample rate.
+    # Within a rate, merge(method=0) consolidates contiguous records and masks
+    # internal gaps; split() re-breaks the masked trace into unmasked segments
+    # so no masked array reaches the STEIM2 writer.
+    by_rate = defaultdict(Stream)
+    for tr in combined:
+        by_rate[tr.stats.sampling_rate] += tr
+    final = Stream()
+    for sr in sorted(by_rate):
+        grp = by_rate[sr]
+        grp.merge(method=0)
+        final += grp.split()
     for tr in final:
         if tr.data.dtype.kind == "f":
             tr.data = tr.data.astype("int32")   # STEIM2 needs int32; decimate gives float64
