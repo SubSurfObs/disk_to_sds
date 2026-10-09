@@ -44,7 +44,8 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from obspy import Stream, UTCDateTime, read
+import numpy as np
+from obspy import Stream, Trace, UTCDateTime, read
 
 
 def day_file(root: Path, net, sta, loc, chan, day: UTCDateTime) -> Path:
@@ -74,6 +75,57 @@ def stepwise_decimate(tr, target_sr: float):
     return out
 
 
+def consolidate_overlapping(traces, sr, max_gap_samples=0):
+    """Fast O(n) stitch of same-rate records that sub-sample-OVERLAP at their
+    boundaries (GPS timing jitter) into continuous Traces.
+
+    Native high-rate day-files come back from read() as thousands of ~8 s
+    fragments separated by ~1 ms (sub-sample) overlaps; ObsPy merge(method=1)
+    resolves them but is pathologically slow at that count. Here each record is
+    placed on an integer sample grid relative to the earliest start; the
+    overlapping head-samples of a later record are dropped (earlier record
+    wins). A real forward gap (> max_gap_samples) closes the current segment and
+    opens a new one. Returns a Stream of unmasked, strictly-contiguous Traces
+    (one per real-gap-separated span)."""
+    traces = sorted((t for t in traces if t.stats.npts), key=lambda t: t.stats.starttime)
+    if not traces:
+        return Stream()
+    dt = 1.0 / sr
+    t0 = traces[0].stats.starttime
+    proto = traces[0].stats
+    segments = []            # (start_idx, [arrays])
+    run_start = run_end = None
+    pieces = None
+    for tr in traces:
+        data = tr.data
+        idx = int(round((tr.stats.starttime - t0) / dt))
+        if run_start is None:
+            run_start, run_end, pieces = idx, idx + len(data), [data]
+            continue
+        if idx <= run_end + max_gap_samples:          # contiguous or overlapping
+            overlap = run_end - idx
+            if overlap >= len(data):
+                continue                               # wholly inside current run
+            if overlap > 0:
+                data = data[overlap:]
+            pieces.append(data)
+            run_end += len(data)
+        else:                                          # real gap -> new segment
+            segments.append((run_start, pieces))
+            run_start, run_end, pieces = idx, idx + len(data), [data]
+    if pieces:
+        segments.append((run_start, pieces))
+    out = Stream()
+    for start_idx, arrs in segments:
+        tr = Trace(data=np.concatenate(arrs))
+        tr.stats.network, tr.stats.station = proto.network, proto.station
+        tr.stats.location, tr.stats.channel = proto.location, proto.channel
+        tr.stats.sampling_rate = sr
+        tr.stats.starttime = t0 + start_idx * dt
+        out.append(tr)
+    return out
+
+
 def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
     """Return (final_stream, out_path, info) for one (day, component), or
     (None, out_path, info) if there's no native input for it."""
@@ -89,49 +141,39 @@ def build_day_channel(day, comp, args) -> tuple[Stream, Path, dict]:
         info["status"] = "no native input"
         return None, out_path, info
 
-    # CONSOLIDATE native first, THEN decimate. The native high-rate records
-    # carry ~1 ms sub-sample OVERLAPS at their boundaries (GPS-disciplined
-    # timing jitter), so read() returns thousands of fragments (FHZ day 278:
-    # 11,110 traces, net -16.6 s of overlap). merge(method=1) resolves the
-    # overlaps into continuous data; split() then yields segments broken only
-    # at REAL (positive) gaps. Decimating the continuous trace -- not the
-    # fragments -- avoids a FIR edge transient at every boundary and produces
-    # clean, few-trace output (the "1 trace, no masked data" the consumer wants).
+    # Consolidate native FIRST (fast numpy stitch of the ~1 ms sub-sample
+    # record-boundary overlaps -> continuous segments, split only at real
+    # gaps), THEN decimate each continuous segment. The 2000->1000 split day
+    # carries both native rates, so group by native sampling rate and decimate
+    # each group (factor 8 and 4 respectively) down to the target.
     native = read(str(src))
-    native.merge(method=1)
-    native = native.split()
-    decimated = Stream()
+    by_native_sr = defaultdict(list)
     for tr in native:
-        decimated += stepwise_decimate(tr, args.target_sr)
+        by_native_sr[tr.stats.sampling_rate].append(tr)
+    decimated = Stream()
+    for nsr, trs in by_native_sr.items():
+        for seg in consolidate_overlapping(trs, nsr):
+            decimated += stepwise_decimate(seg, args.target_sr)
     for tr in decimated:
         tr.stats.network, tr.stats.station = net, sta
         tr.stats.location, tr.stats.channel = loc, out_chan
-
-    # fold in any existing output-band data already in LT (blip + idempotency)
-    existing_lt = day_file(sds_in, net, sta, loc, out_chan, day)
-    combined = decimated
-    folded = False
-    if existing_lt.exists():
-        combined = read(str(existing_lt)) + decimated
-        folded = True
-
-    # Merge ONLY within a sampling-rate group: a folded-in native segment at a
-    # different rate (e.g. the 500 Hz day-277 blip) must survive as its own
-    # trace -- ObsPy refuses to merge same-id traces of differing sample rate.
-    # Within a rate, merge(method=0) consolidates contiguous records and masks
-    # internal gaps; split() re-breaks the masked trace into unmasked segments
-    # so no masked array reaches the STEIM2 writer.
-    by_rate = defaultdict(Stream)
-    for tr in combined:
-        by_rate[tr.stats.sampling_rate] += tr
-    final = Stream()
-    for sr in sorted(by_rate):
-        grp = by_rate[sr]
-        grp.merge(method=0)
-        final += grp.split()
-    for tr in final:
         if tr.data.dtype.kind == "f":
             tr.data = tr.data.astype("int32")   # STEIM2 needs int32; decimate gives float64
+
+    # Preserve any native data already at the output channel that is NOT at the
+    # target rate (e.g. the 500 Hz day-277 blip) as its own trace. Same-rate
+    # existing content is regenerated deterministically from native, so we don't
+    # re-read it -- that keeps re-runs idempotent and avoids a slow cross-run merge.
+    final = decimated
+    folded = False
+    existing_lt = day_file(sds_in, net, sta, loc, out_chan, day)
+    if existing_lt.exists():
+        for tr in read(str(existing_lt)):
+            if abs(tr.stats.sampling_rate - args.target_sr) > 1e-6:
+                if tr.data.dtype.kind == "f":
+                    tr.data = tr.data.astype("int32")
+                final += tr
+                folded = True
 
     rates = sorted({tr.stats.sampling_rate for tr in final})
     info.update(status="ok", folded_existing_lt=folded, traces=len(final),
