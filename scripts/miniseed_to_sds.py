@@ -157,17 +157,16 @@ def main(argv):
             print("   ", c)
         return 2
 
-    # per channel: dedup overlaps (merge method=1) + split real gaps, then day-split
-    by_id = defaultdict(Stream)
-    for tr in kept:
-        by_id[tr.id] += tr
+    # Route every record to its SDS day by record start-time. No pre-merge here:
+    # the per-day consolidate_overlapping below dedups overlapping downloads,
+    # bridges sub-sample minute-jitter, and keeps real gaps. A global
+    # merge(method=1) across a channel's fragmented minute-boundary traces would
+    # be O(n^2) (the SGWU pathology).
     day_streams = defaultdict(Stream)   # (net,sta,loc,cha,year,doy) -> Stream
-    for cid, st in by_id.items():
-        st.merge(method=1)
-        for tr in st.split():
-            net, sta, loc, cha = tr.stats.network, tr.stats.station, tr.stats.location, tr.stats.channel
-            for year, doy, piece in day_pieces(tr):
-                day_streams[(net, sta, loc, cha, year, doy)] += piece
+    for tr in kept:
+        net, sta, loc, cha = tr.stats.network, tr.stats.station, tr.stats.location, tr.stats.channel
+        for year, doy, piece in day_pieces(tr):
+            day_streams[(net, sta, loc, cha, year, doy)] += piece
 
     written = 0
     for (net, sta, loc, cha, year, doy), st in sorted(day_streams.items()):
