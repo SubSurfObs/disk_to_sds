@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """Fetch station-day MiniSEED from Seismosphere's web extractor.
 
+** DEPRECATED 2026-10-16 — superseded by the shared `seismospheretools` package
+(v0.1.0; `pip install -e ~/projects/SubSurfObs/seismospheretools`; CLI
+`sstools fetch-range <SITE> <start> <end> --out <dir>`). That package now owns
+the download/session/politeness/provenance layer with more guarantees (typed
+errors for 5xx/429, content-based re-login, retention-edge probe, a provenance
+dataclass). Use it. This script is kept only as a stdlib-only fallback for when
+the package isn't installed; it is no longer the primary path. The ingest half
+(miniseed_to_sds.py: select / remap / dedup / jitter-bridge -> SDS) is unchanged
+and still consumes the .ms.zip files either producer writes. **
+
 The automated front-end to miniseed_to_sds.py: logs in, pulls one 24 h request
 per station per day (duration=1440 -> no chunking), saves each `.ms.zip` into an
 --out-dir drop-zone, then miniseed_to_sds.py ingests -> staging -> apply -> LT.
