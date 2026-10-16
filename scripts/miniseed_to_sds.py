@@ -46,6 +46,9 @@ from pathlib import Path
 
 from obspy import Stream, UTCDateTime, read
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from resample_to_sds import consolidate_overlapping  # noqa: E402  (shared jitter-bridge + dedup)
+
 MSEED_EXTS = (".ms", ".mseed", ".seed", ".miniseed")
 
 
@@ -119,6 +122,10 @@ def main(argv):
                                                  "e.g. 'DU.ARKL2.00.EHZ' or 'DU.ARKL2.*'")
     p.add_argument("--remap", action="append", default=[], help="OLD_NSLC=NEW_NSLC (repeatable)")
     p.add_argument("--reclen", type=int, default=512)
+    p.add_argument("--bridge-gap-s", type=float, default=0.01,
+                   help="fill positive-gap holes shorter than this (seconds) -- sub-sample timing "
+                        "jitter at EQ-server minute-file boundaries; larger holes stay as real "
+                        "gaps. 0 = faithful (bridge nothing). Default 0.01 (10 ms).")
     p.add_argument("--dry-run", action="store_true")
     args = p.parse_args(argv[1:])
 
@@ -164,15 +171,21 @@ def main(argv):
 
     written = 0
     for (net, sta, loc, cha, year, doy), st in sorted(day_streams.items()):
-        st.merge(method=1)
-        final = st.split()
+        sr = st[0].stats.sampling_rate
+        bridge = int(round(args.bridge_gap_s * sr))
+        # grid-consolidate: dedup overlapping downloads, bridge sub-sample
+        # minute-boundary jitter (<= bridge samples), keep real gaps as splits.
+        final, nbridged, nreal = consolidate_overlapping(st.traces, sr, bridge)
+        if not final:
+            continue
         for tr in final:
             if tr.data.dtype.kind == "f":
                 tr.data = tr.data.astype("int32")
         npts = sum(tr.stats.npts for tr in final)
         span = f"{final[0].stats.starttime} -> {final[-1].stats.endtime}"
         out_path = sds_path(sds_out, net, sta, loc, cha, year, doy)
-        tag = f"{net}.{sta}.{loc}.{cha}.{year}.{doy:03d}: {len(final)} trace(s), {npts:,} samp  {span}"
+        tag = (f"{net}.{sta}.{loc}.{cha}.{year}.{doy:03d}: {len(final)} trace(s), {npts:,} samp, "
+               f"bridged={nbridged} real_gaps={nreal}  {span}")
         if args.dry_run:
             print(f"  [dry] would write {tag}")
             continue
