@@ -17,6 +17,7 @@ SUDS carries no network code and wrong channel codes, so we remap:
 from __future__ import annotations
 
 import os
+import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -31,6 +32,23 @@ ECHOPRO_ORIENT = {"c01": "N", "c02": "E", "c03": "Z"}  # c04 = microphone -> exc
 # (incl. velocity) -> traces=0 -> silent end-to-end data loss.
 ECHO_ORIENT = {"Up-T": "Z", "North-T": "N", "East-T": "E"}
 INSTRUMENT = "H"  # high-gain seismometer
+
+# Some SUDS files carry channels ALREADY named in SEED convention. KORUM's
+# EqServer output, for example, switches c01/c02/c03 -> EHE/EHN/EHZ partway
+# through a deployment (same 100 Hz seismometer, relabelled). Recognise standard
+# seismometer codes <band><H><orient> with band in E/S/H/B and instrument 'H'
+# (high-gain velocity); orientation is the trailing char, handed to channel_for()
+# so the inventory normalises band+location (e.g. EHZ -> HHZ.60 for KORUM).
+# Conservative by design: accelerometers (instrument 'N'), microphones, and other
+# non-seismometer codes do NOT match and still fall through to dropped[]. Without
+# this, SEED-named seismometer channels silently drop -> traces=0 -> end-to-end
+# data loss (same class as the Echo-format gap, handoffs/.../2026-06-11).
+_SEED_SEISMO_RE = re.compile(r"^[ESHB]H[ZNE123]$")
+
+
+def seed_passthrough_orient(channel):
+    """Orientation char for an already-SEED-named seismometer channel, else None."""
+    return channel[-1] if _SEED_SEISMO_RE.match(channel or "") else None
 
 
 def seed_band(rate_hz: float) -> str:
@@ -104,9 +122,11 @@ def convert_suds_files(files, network, station, inv=None):
             recovered.append((str(f), diag.get("stop_reason"),
                               diag.get("n_blocks"), diag.get("last_good_offset")))
         for tr in raw:
-            # EchoPro (c01/c02/c03) first, then Echo (Up-T/North-T/East-T).
+            # EchoPro (c01/c02/c03) first, then Echo (Up-T/North-T/East-T), then
+            # already-SEED-named seismometer channels (e.g. KORUM EHE/EHN/EHZ).
             orient = (ECHOPRO_ORIENT.get(tr.stats.channel)
-                      or ECHO_ORIENT.get(tr.stats.channel))
+                      or ECHO_ORIENT.get(tr.stats.channel)
+                      or seed_passthrough_orient(tr.stats.channel))
             if orient is None:
                 dropped.add(tr.stats.channel)
                 continue
