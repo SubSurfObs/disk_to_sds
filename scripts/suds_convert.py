@@ -216,9 +216,15 @@ def write_sds(stream, sds_root, encoding="STEIM2", reclen=512):
     for path, trs in groups.items():
         s = Stream(trs)
         # Merge-on-write: fold in whatever is already filed for this day.
+        # The EXISTING file's traces go FIRST: the merge's equal-start tie
+        # break is input order (stable sort by starttime), so first-write-
+        # wins. Callers that order winner data before fill data therefore
+        # keep winner priority across successive write calls (eqserver
+        # review 2026-10-23 F5). Idempotent re-runs are unaffected — same
+        # samples either way.
         if path.exists() and path.stat().st_size > 0:
             try:
-                s += read_mseed(str(path), format="MSEED")
+                s = read_mseed(str(path), format="MSEED") + s
             except Exception as e:
                 # Don't lose new data because an existing file is unreadable;
                 # preserve the suspect file for inspection rather than clobber.
