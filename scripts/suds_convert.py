@@ -43,7 +43,11 @@ INSTRUMENT = "H"  # high-gain seismometer
 # non-seismometer codes do NOT match and still fall through to dropped[]. Without
 # this, SEED-named seismometer channels silently drop -> traces=0 -> end-to-end
 # data loss (same class as the Echo-format gap, handoffs/.../2026-06-11).
-_SEED_SEISMO_RE = re.compile(r"^[ESHB]H[ZNE123]$")
+# All SEED bands in the archive's universe (B/S@50, H/E@100-200, C/D@250-
+# 800, F/G@1000+): [ESHB] silently excluded the C band — VW's own 250 sps
+# convention — dropping SUDS telemetry stubs labelled CHZ (eqserver
+# witness finding, 2026-10-27). Keep identical to qa_verify SEED_SEISMO_RE.
+_SEED_SEISMO_RE = re.compile(r"^[FGCDHESB]H[ZNE123]$")
 
 
 def seed_passthrough_orient(channel):
