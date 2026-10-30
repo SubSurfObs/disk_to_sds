@@ -31,6 +31,21 @@ ECHOPRO_ORIENT = {"c01": "N", "c02": "E", "c03": "Z"}  # c04 = microphone -> exc
 # being excluded on EchoPro). Without this, Echo-format files drop ALL channels
 # (incl. velocity) -> traces=0 -> silent end-to-end data loss.
 ECHO_ORIENT = {"Up-T": "Z", "North-T": "N", "East-T": "E"}
+# Spelling variants seen in EqServer (2026-10-31): "Up" (RNDA, one channel),
+# "Up T" / "East T" / "North T" (BRTS, PLMR). Normalised to the -T form; Up is
+# Z by SEED definition. "-A" (accelerometer) stays dropped. Keep identical to
+# eqserver qa_verify._suds_component.
+_ECHO_BARE = {"up": "Z", "north": "N", "east": "E"}
+
+
+def echo_orient(channel):
+    """Orientation for an Echo-family label in any observed spelling, else None."""
+    c = re.sub(r"[\s_]+", "-", (channel or "").strip()).lower()
+    if c.endswith("-t"):
+        c = c[:-2]
+    elif "-" in c:
+        return None  # e.g. Up-A (accelerometer) or anything unrecognised
+    return _ECHO_BARE.get(c)
 INSTRUMENT = "H"  # high-gain seismometer
 
 # Some SUDS files carry channels ALREADY named in SEED convention. KORUM's
@@ -122,6 +137,16 @@ def convert_suds_files(files, network, station, inv=None):
         except Exception as e:
             read_errors.append((str(f), f"{type(e).__name__}: {e}"))
             continue
+        if diag.get("gzip_truncated"):
+            # A compressed member that genuinely ends early: only complete
+            # blocks were kept, but data is missing — a read error (day is
+            # flagged, never silently ok). Trailing filler after a verified
+            # member (MRAT deadbeefcafecafe) is lossless and only noted.
+            read_errors.append((str(f), "gzip member truncated: "
+                                "kept complete blocks only"))
+        if diag.get("gzip_trailing_bytes"):
+            recovered.append((str(f), "gzip_trailing_bytes",
+                              diag.get("n_blocks"), diag["gzip_trailing_bytes"]))
         if diag.get("stop_reason") not in (None, "clean_eof"):
             recovered.append((str(f), diag.get("stop_reason"),
                               diag.get("n_blocks"), diag.get("last_good_offset")))
@@ -129,7 +154,7 @@ def convert_suds_files(files, network, station, inv=None):
             # EchoPro (c01/c02/c03) first, then Echo (Up-T/North-T/East-T), then
             # already-SEED-named seismometer channels (e.g. KORUM EHE/EHN/EHZ).
             orient = (ECHOPRO_ORIENT.get(tr.stats.channel)
-                      or ECHO_ORIENT.get(tr.stats.channel)
+                      or echo_orient(tr.stats.channel)
                       or seed_passthrough_orient(tr.stats.channel))
             if orient is None:
                 dropped.add(tr.stats.channel)
