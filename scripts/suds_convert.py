@@ -35,17 +35,28 @@ ECHO_ORIENT = {"Up-T": "Z", "North-T": "N", "East-T": "E"}
 # "Up T" / "East T" / "North T" (BRTS, PLMR). Normalised to the -T form; Up is
 # Z by SEED definition. "-A" (accelerometer) stays dropped. Keep identical to
 # eqserver qa_verify._suds_component.
-_ECHO_BARE = {"up": "Z", "north": "N", "east": "E"}
+_ECHO_BARE = {"up": "Z", "north": "N", "east": "E",
+              # PC-SUDS one-letter component codes (HKER 2017 "v",
+              # "v Trans"; HKER 2018 files pair short "v" with c03 = Z)
+              "v": "Z", "n": "N", "e": "E"}
 
 
 def echo_orient(channel):
     """Orientation for an Echo-family label in any observed spelling, else None."""
     c = re.sub(r"[\s_]+", "-", (channel or "").strip()).lower()
-    if c.endswith("-t"):
-        c = c[:-2]
-    elif "-" in c:
-        return None  # e.g. Up-A (accelerometer) or anything unrecognised
+    for suffix in ("-t", "-trans"):  # "-T"/"Trans" = translational (velocity)
+        if c.endswith(suffix):
+            c = c[: -len(suffix)]
+            break
+    else:
+        if "-" in c:
+            return None  # e.g. Up-A (accelerometer) or anything unrecognised
+        return _ECHO_BARE.get(c)
+    if "-" in c:
+        return None
     return _ECHO_BARE.get(c)
+
+
 INSTRUMENT = "H"  # high-gain seismometer
 
 # Some SUDS files carry channels ALREADY named in SEED convention. KORUM's
