@@ -140,11 +140,13 @@ def convert_suds_files(files, network, station, inv=None):
     # "truncated mid-data, partial recovery" (short_data) — the latter is real
     # data loss worth flagging.
     recovered: list = []
+    truncated: list = []
     rate = None
     for f in files:
         diag: dict = {}
         try:
-            raw = sudspy.read_suds_stream(str(f), diag=diag)
+            raw = sudspy.read_suds_stream(str(f), diag=diag,
+                                          recover_truncated=True)
         except Exception as e:
             read_errors.append((str(f), f"{type(e).__name__}: {e}"))
             continue
@@ -155,6 +157,10 @@ def convert_suds_files(files, network, station, inv=None):
             # member (MRAT deadbeefcafecafe) is lossless and only noted.
             read_errors.append((str(f), "gzip member truncated: "
                                 "kept complete blocks only"))
+        if diag.get("truncated_trace"):
+            # Waveform block cut short: its complete sample prefix was kept
+            # (eqserver Codex 1b27f4f). Recorded per file, loudly.
+            truncated.append((str(f), diag["truncated_trace"]))
         if diag.get("gzip_trailing_bytes"):
             recovered.append((str(f), "gzip_trailing_bytes",
                               diag.get("n_blocks"), diag["gzip_trailing_bytes"]))
@@ -180,6 +186,7 @@ def convert_suds_files(files, network, station, inv=None):
     qc = {"read_errors": read_errors, "dropped_components": sorted(dropped),
           "rate_hz": rate, "n_traces": len(out),
           "recovered_files": recovered,
+          "truncated_recovered": truncated,
           "n_recovered": len(recovered)}
     return out, qc
 
