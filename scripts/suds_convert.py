@@ -38,7 +38,9 @@ ECHO_ORIENT = {"Up-T": "Z", "North-T": "N", "East-T": "E"}
 _ECHO_BARE = {"up": "Z", "north": "N", "east": "E",
               # PC-SUDS one-letter component codes (HKER 2017 "v",
               # "v Trans"; HKER 2018 files pair short "v" with c03 = Z)
-              "v": "Z", "n": "N", "e": "E"}
+              "v": "Z", "n": "N", "e": "E",
+              # BRAD / PEGM 2013 label the vertical "z" beside "e" / "n"
+              "z": "Z"}
 
 
 def echo_orient(channel):
